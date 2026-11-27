@@ -1,5 +1,3 @@
-// -*- mode: Bluespec; -*-
-//
 // Cross-process ordering model for lock, unlock, sleep and grants.
 //
 // Written before any implementation. It is a proposal for the contract in
@@ -7,8 +5,8 @@
 // directory for scope, abstractions, commands and the mapping to reducer events.
 //
 // `DEFECT` selects one deliberately broken variant of the design. The chosen
-// design is `DEFECT = "none"`; every other value removes exactly one rule, and
-// the simulator is expected to find a counterexample for it (variants.qnt).
+// design uses `"none"`. The ablations remove a rule, and `"sleep_hold"` adds
+// the candidate hold described in variants.qnt.
 module lock {
   const DEFECT: str
 
@@ -114,7 +112,8 @@ module lock {
     stops: Set[Stop],         // indicator -> compositor
   }
 
-  /// History variables. No process reads them; the invariants do.
+  /// History used by the monitors. The environment also uses issued grant IDs
+  /// to choose deadlines.
   type Ghost = {
     pamOk: Set[Bind],         // PAM succeeded for this binding
     okIssued: Set[Bind],      // authd issued a positive verdict for this binding
@@ -392,7 +391,7 @@ module lock {
     val attemptOk =
       (v.b.attempt == comp.attempt and comp.open) or defect("skip_attempt_check")
     val cur = bindOf(comp)
-    val verified = comp.open and gh.okIssued.contains(cur)
+    val verified = comp.open and v.b == cur and gh.okIssued.contains(v.b)
     all {
       net.verdicts.contains(v),
       clockOk,
@@ -618,9 +617,9 @@ module lock {
     sl' = { ...sl, inhibit: false },
     gh' = {
       ...gh,
-      badRelease: gh.badRelease or not(gh.lockedSinceReq),
-      sawSleepByAck: gh.sawSleepByAck or gh.lockedSinceReq,
-      ackSleep: gh.lockedSinceReq,
+      badRelease: gh.badRelease or r != sl.req or not(gh.lockedSinceReq),
+      sawSleepByAck: gh.sawSleepByAck or (r == sl.req and gh.lockedSinceReq),
+      ackSleep: r == sl.req and gh.lockedSinceReq,
     },
     comp' = comp, kms' = kms, auth' = auth, world' = world, net' = net,
   }
@@ -631,7 +630,7 @@ module lock {
   /// reaches the compositor after the resume. No frame submitted before the
   /// sleep reaches the panel after it.
   pure def atSuspend(k: Kms, drain: bool): Kms =
-    if (not(k.busy)) k
+    if (not(k.busy) or k.resolved) k
     else if (drain) { ...k, screen: k.pending, resolved: true }
     else { ...k, resolved: true }
 
@@ -741,7 +740,7 @@ module lock {
           // that is already gone is revoked from birth.
           revoked: gh.revoked.union(Set(old.gen)).union(
             if (q.win != world.win or q.conn != world.conn.get(q.h)) Set(gen) else Set()),
-          unconsented: gh.unconsented or not(gh.allowed.contains(q.id)),
+          unconsented: gh.unconsented or a.id != q.id or not(gh.allowed.contains(q.id)),
         } else gh,
       kms' = kms, sl' = sl, auth' = auth, net' = net,
     }
@@ -808,7 +807,7 @@ module lock {
   /// The portal, the agent or its broker dies and a new process connects.
   action holderRestart(h: Holder): bool = all {
     awake,
-    world' = { ...world, conn: world.conn.set(h, world.conn.get(h) + 1) },
+    world' = { ...world, conn: world.conn.setBy(h, generation => generation + 1) },
     gh' = { ...gh, revoked: gh.revoked.union(Set(comp.grants.get(h).gen)) },
     comp' = comp, kms' = kms, sl' = sl, auth' = auth, net' = net,
   }
@@ -982,9 +981,8 @@ module lock {
     userPressStop(h),
   }
 
-  /// One step of the whole system. The simulator picks one enabled branch of
-  /// `any` uniformly, so repeating a group weights the random walk towards the
-  /// plain path (about 1 pick in 12 is a fault, 1 in 12 a stale delivery).
+  /// Repeated groups weight sampling toward the plain path. Their actual
+  /// frequencies depend on the enabled branches and nondeterministic picks.
   /// Repetition changes no reachable state.
   action step = any {
     stepLock, stepLock, stepLock, stepLock,
@@ -995,7 +993,7 @@ module lock {
     stepFault,
   }
 
-  /// The same system with every group equally likely: a fault storm.
+  /// The fault storm gives each group one entry in the same transition relation.
   action stepStorm = any { stepLock, stepGrant, stepSleep, stepStart, stepStale, stepFault }
 
   // -------------------------------------------------------------- invariants
@@ -1030,8 +1028,8 @@ module lock {
 
   /// B across suspend (REQ-LOCK-015, REQ-LOCK-016): after a
   /// resume no session frame is submitted and none is presented before an
-  /// unlock by verdict in the same wake period. The first frame that reaches
-  /// the panel after a resume is therefore a lock frame.
+  /// unlock by verdict in the same wake period. REQ-LOCK-015 also constrains
+  /// the first submission when an authorized unlock happens first (see README).
   val propB_resume = not(gh.sessionAfterResume)
 
   /// REQ-LOCK-018: the delay inhibitor is released by an
@@ -1089,7 +1087,7 @@ module lock {
     (sl.suspended and gh.ackSleep) implies kms.screen != SessionFrame
 
   // --------------------------------------------------------------- witnesses
-  // Each must be reachable, otherwise the invariants above hold vacuously.
+  // These predicates measure coverage. Agent capture is reachable only after v1.
   val witUnlock = gh.sawUnlock
   val witAck = gh.sawAck
   val witDelivery = gh.sawDelivery
@@ -1186,7 +1184,7 @@ module lock {
       })
 
   /// unlockProgress (proposed): with the right secret the session unlocks
-  /// within 20 fault-free steps from any reachable state (32 with the option
+  /// within 20 fault-free steps from each sampled 40-step prefix (32 with the option
   /// "sleep_hold", which may have to finish a sleep cycle first).
   run unlockProgressTest =
     init
@@ -1205,14 +1203,16 @@ module lock {
   /// From `Unlocked` to an acknowledged lock.
   run toLocked = compLock.then(compRender(true)).then(kmsFlipDone)
 
-  /// From a fresh `Locked` to a positive verdict for (1, 1, 1) in flight.
-  run toVerdict11 =
-    compOpenAttempt
-      .then(authdRecvChallenge(B11))
+  /// Issue a positive verdict for an already open attempt.
+  run issuePositive(b: Bind): bool =
+    authdRecvChallenge(b)
       .then(userType(true))
-      .then(authdRecvCred({ b: B11, good: true }))
-      .then(pwcheckRun({ b: B11, good: true }))
-      .then(authdRecvPam(OK11))
+      .then(authdRecvCred({ b: b, good: true }))
+      .then(pwcheckRun({ b: b, good: true }))
+      .then(authdRecvPam({ b: b, ok: true }))
+
+  /// From a fresh `Locked` to a positive verdict for (1, 1, 1) in flight.
+  run toVerdict11 = compOpenAttempt.then(issuePositive(B11))
 
   /// First grant of the run (generation 1) for holder `h`.
   run toGrant(h: Holder): bool =
@@ -1294,9 +1294,7 @@ module lock {
   /// before the lock is not delivered after it.
   run queuedDeliveryDroppedByLockTest =
     init
-      .then(compAsk(Portal))
-      .then(consentAnswer({ inst: 1, n: 1 }, true))
-      .then(compRecvAnswer({ id: { inst: 1, n: 1 }, allow: true }))
+      .then(toGrant(Portal))
       .then(compEnqueue(Portal))
       .then(compDispatch({ h: Portal, gen: 1, seq: 1 }))
       .expect(gh.sawDelivery and comp.grants.get(Portal).live)
@@ -1309,9 +1307,7 @@ module lock {
   /// REQ-AGENT-005: two queued deliveries on one agent grant, one arrives.
   run agentOneShotTest =
     init
-      .then(compAsk(AgentTransfer))
-      .then(consentAnswer({ inst: 1, n: 1 }, true))
-      .then(compRecvAnswer({ id: { inst: 1, n: 1 }, allow: true }))
+      .then(toGrant(AgentTransfer))
       .then(compEnqueue(AgentTransfer))
       .then(compEnqueue(AgentTransfer))
       .then(compDispatch({ h: AgentTransfer, gen: 1, seq: 1 }))
@@ -1359,6 +1355,30 @@ module lock {
   run cx_skip_instance_check =
     instancePrefix.then(compRecvVerdict(OK11))
       .expect(comp.phase == Unlocked and not(propA_verdict))
+
+  /// REQ-AUTH-001: even when both instances have issued a positive verdict,
+  /// the evidence for an unlock must identify the message that caused it.
+  run cx_coincident_verdict = {
+    val current = { ...B11, inst: 2 }
+    instancePrefix.then(issuePositive(current))
+      .expect(gh.okIssued.contains(B11) and gh.okIssued.contains(current))
+      .then(compRecvVerdict(OK11))
+      .expect(not(propA_verdict))
+  }
+
+  /// REQ-GRANT-015: an old Allow cannot authorize a new prompt even if
+  /// the user separately allowed both. Both answers are in flight at delivery.
+  run cx_coincident_allow = {
+    val current = { inst: 2, n: 1 }
+    init.then(compAsk(Portal)).then(consentAnswer(ASK1, true))
+      .then(compRestart).then(compRender(true)).then(kmsFlipDone)
+      .then(compOpenAttempt).then(issuePositive({ ...B11, inst: 2 }))
+      .then(compRecvVerdict({ b: { ...B11, inst: 2 }, ok: true }))
+      .then(compAsk(Portal)).then(consentAnswer(current, true))
+      .expect(gh.allowed == Set(ASK1, current))
+      .then(compRecvAnswer({ id: ASK1, allow: true }))
+      .expect(comp.grants.get(Portal).live and not(propC_consent))
+  }
 
   /// REQ-AUTH-001, REQ-AUTH-015: counters restart with the compositor, so only
   /// the instance id tells an old verdict from a new one.
@@ -1457,6 +1477,14 @@ module lock {
     staleAckPrefix.then(bridgeRecvAck(1)).then(logindSuspend(true))
       .expect(sl.suspended and comp.phase == Unlocked and not(propS_sleep))
 
+  /// REQ-LOCK-024: the second request already has a matching acknowledgement,
+  /// but it is the nonce of the message actually received that authorizes release.
+  run cx_coincident_ack =
+    staleAckPrefix.then(toLocked).then(compAckLockReq(2))
+      .expect(net.lockAcks == Set(1, 2) and gh.lockedSinceReq)
+      .then(bridgeRecvAck(1))
+      .expect(not(sl.inhibit) and not(propS_sleep))
+
   /// REQ-LOCK-024: the acknowledgement of an earlier sleep
   /// cycle does not release the inhibitor of this one.
   run staleLockAckGuardTest =
@@ -1549,6 +1577,15 @@ module lock {
       .expect(comp.phase == Locking and not(gh.mustCover) and safety)
       .then(compRender(true)).then(kmsFlipDone)
       .expect(comp.phase == Locked and kms.screen == LockFrame and safety)
+
+  /// REQ-LOCK-015: only the completion event survives a settled flip.
+  /// A second suspend before that event is read cannot present a discarded frame.
+  run settledFlipAcrossTwoSleepsTest =
+    init.then(compLock).then(compRender(true))
+      .then(logindPrepareSleep).then(inhibitTimeout(false)).then(resume)
+      .expect(kms.resolved and kms.pending == LockFrame and kms.screen == SessionFrame)
+      .then(logindPrepareSleep).then(inhibitTimeout(true))
+      .expect(kms.resolved and kms.screen == SessionFrame and safety)
 
   /// REQ-LOCK-015: a session frame pending at
   /// the suspend is shown before the sleep or never. The first frame that

@@ -1,12 +1,25 @@
-// -*- mode: Bluespec; -*-
-//
 // Instances of the model in lock.qnt. `chosen` is the design. The `rejected_`
 // and `ablate_` modules each remove one rule and must produce a counterexample.
 // `option_sleep_hold` adds one candidate rule (see README.md).
 
 /// The chosen design for v1: no agent capture of host windows. All invariants
 /// must hold.
-module chosen { import lock(DEFECT = "none", AGENT_CAPTURE = false).* from "./lock" }
+module chosen {
+  import lock(DEFECT = "none", AGENT_CAPTURE = false).* from "./lock"
+
+  /// REQ-LOCK-018 acceptance criterion: the panel can be uncovered at release.
+  run catalogGapAtRelease =
+    init.then(logindPrepareSleep).then(bridgeSeeSleep).then(toLocked).then(toVerdict11)
+      .then(compAckLockReq(1)).then(compRecvVerdict(OK11))
+      .then(compRender(true)).then(kmsFlipDone).then(bridgeRecvAck(1))
+      .expect(not(sl.inhibit) and kms.screen == SessionFrame and propS_sleep and safety)
+
+  /// REQ-LOCK-015: a fresh authorized unlock can precede the first submission.
+  run catalogGapFirstSubmission =
+    init.then(toLocked).then(logindPrepareSleep).then(inhibitTimeout(false))
+      .then(resume).then(compSeeJump).then(toVerdict11).then(compRecvVerdict(OK11))
+      .then(compRender(true)).expect(kms.pending == SessionFrame and propB_resume and safety)
+}
 
 /// Rejected design: the ext-session-lock client unlocks by itself.
 module rejected_client_unlock {
@@ -30,6 +43,8 @@ module ablate_render_error {
 module ablate_instance {
   import lock(DEFECT = "skip_instance_check", AGENT_CAPTURE = false).* from "./lock"
   run counterexampleTest = cx_skip_instance_check
+  run counterexampleCoincidentTest = cx_coincident_verdict
+  run counterexampleConsentTest = cx_coincident_allow
 }
 
 /// Verdict not bound to the lock epoch.
@@ -78,6 +93,7 @@ module ablate_resume_attempt {
 module ablate_stale_ack {
   import lock(DEFECT = "stale_ack", AGENT_CAPTURE = false).* from "./lock"
   run counterexampleTest = cx_stale_ack
+  run counterexampleCoincidentAckTest = cx_coincident_ack
 }
 
 /// Lock does not revoke grants.
