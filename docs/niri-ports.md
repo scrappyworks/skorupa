@@ -1,0 +1,15 @@
+# Code ported from niri
+
+Ledger for REQ-DEP-009. Every file that contains code ported from [niri](https://github.com/niri-wm/niri) has a row here and a header comment naming the same source. niri is `GPL-3.0-or-later`, as is Skorupa.
+
+- **Revision:** `02ee0585b9da359cb30aa2a13a6023a6e471cc23` (`v26.04-324-g02ee0585`) unless a row says otherwise.
+- **Authorship:** the niri contributors, as recorded in the upstream git history of the listed files at that revision.
+- **Line ranges** refer to the niri file at that revision.
+
+| Our path | niri path | Revision | What changed |
+| --- | --- | --- | --- |
+| `compositor/core/src/frame_clock/clock.rs` | `src/frame_clock.rs`; `src/backend/tty.rs:3101-3123` (`refresh_interval`) | `02ee0585` | `now` is an argument instead of a clock read. VRR is left out. An unknown presentation time is `None` instead of zero. A zero refresh interval counts as unknown instead of panicking, and the arithmetic saturates. **Behavior change:** `now == last_presentation_time` is no longer treated as an early vblank (`<` instead of `<=` at `frame_clock.rs:68`), so it targets the next refresh instead of the one after it. The "2+ early VBlank" log line became a flag that the reducer reports as `Anomaly::FlipFarInFuture`. `refresh_interval` takes plain mode fields instead of a DRM mode, computes in `u128`, and returns `None` for a mode without a rate. |
+| `compositor/core/src/frame_clock/throttle.rs` | `src/utils/vblank_throttle.rs` | `02ee0585` | The event-loop timer and the callback are gone: `throttle` returns how long to hold the vblank, and the reducer arms `Timer::Throttle`. The one-time warning is left to the adapter. |
+| `compositor/core/src/frame_clock/redraw.rs` | `src/niri.rs:528-557`, `570-583`, `716-735`, `5071-5129`; `src/backend/tty.rs:1652-1846`, `1848-1887`, `2023-2048`, `2066-2070`, `3141-3185` | `02ee0585` | The transitions of `RedrawState` that niri spreads over `Niri::redraw`, `Tty::render`, `Tty::on_vblank`, `Tty::on_estimated_vblank_timer` and `queue_estimated_vblank_timer` are one reducer, `FramePacer::step`, with rendering, timers, frame callbacks and presentation feedback as effects. Timer tokens left the states; the adapter keeps one deadline per timer kind. **Not ported:** the branch at `niri.rs:5145-5148` that unlocks the session when a locked frame fails to render (REQ-LOCK-011), VRR, Tracy plots, screencast and capture hooks. **Behavior changes:** a timer that fires in a state that did not arm it is reported and ignored, where niri resets the output to idle (`tty.rs:1872-1879`) and so drops a queued redraw; states niri marks `unreachable!()` are reported as `Anomaly::UnexpectedRendered`. **Added:** the flip watchdog (`Timer::FlipWatchdog`, `Effect::FlipTimedOut`, REQ-PERF-013); a throttled flip stops the watchdog. |
+
+niri has no tests for these three pieces at this revision, so there were none to port; the tests in `compositor/core/tests/frame_clock*.rs` are new.
