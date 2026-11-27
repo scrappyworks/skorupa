@@ -47,13 +47,13 @@ lint-fuzz:
     cargo fmt --manifest-path fuzz/Cargo.toml -- --check
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
-# Lines of Rust code per component against budget.toml (needs tokei).
+# Lines of code of every Rust file, per component, against budget.toml (needs tokei).
 budget:
-    python3 scripts/budget.py
+    python3 -B scripts/budget.py
 
-# Every test names a requirement id, and the id exists in docs/requirements.md.
+# Every test names a requirement id; ids in tests and spec/*.qnt exist in docs/requirements.md.
 req-lint:
-    python3 scripts/req-lint.py
+    python3 -B scripts/req-lint.py
 
 # Advisories, licenses, bans and sources for each lockfile. Fetches the RustSec database.
 deny:

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Compare the amount of Rust code with the size budget in budget.toml.
 
-Counts the "code" column of tokei for Rust, tests included, and gives every
-file to the component whose path contains it. Exits with 1 when a component or
-the total is above its cap, or when a Rust file belongs to no component.
+Counts the "code" column of tokei for every Rust file in the repository, tests
+included, and gives each file to the component whose path contains it. Exits
+with 1 when a component or the total is above its cap, or when a Rust file
+belongs to no component: code cannot hide outside the budget.
 
     budget.py [--root DIR] [--budget FILE]
 """
@@ -15,18 +16,27 @@ import sys
 import tomllib
 from pathlib import Path
 
+from sources import repository_files
+
 
 def rust_code_by_file(root: Path) -> dict[Path, int]:
-    """Lines of Rust code per file, paths relative to root."""
+    """Lines of code of every Rust file in the repository, wherever it lies."""
+    files = repository_files(root, ".rs")
+    if not files:
+        return {}
     result = subprocess.run(
-        ["tokei", "--output", "json", "--types", "Rust", "."],
+        ["tokei", "--output", "json", "--types", "Rust", "--", *map(str, files)],
         cwd=root,
         check=True,
         capture_output=True,
         text=True,
     )
     reports = json.loads(result.stdout).get("Rust", {}).get("reports", [])
-    return {Path(report["name"]): report["stats"]["code"] for report in reports}
+    counted = {Path(report["name"]): report["stats"]["code"] for report in reports}
+    missing = [str(file) for file in files if file not in counted]
+    if missing:
+        sys.exit(f"budget: tokei did not count {' '.join(missing)}")
+    return counted
 
 
 def main() -> int:

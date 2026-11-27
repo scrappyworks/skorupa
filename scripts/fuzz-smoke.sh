@@ -14,9 +14,17 @@ runs=${FUZZ_SMOKE_RUNS:-100000}
 work=$(mktemp -d -t skorupa-fuzz-smoke.XXXXXX)
 trap 'rm -rf "${work:?}"' EXIT
 
-for target in $(cargo fuzz list --fuzz-dir .); do
+# Listed first, as its own command: a failed or empty listing must fail the
+# run, not skip it.
+targets=$(cargo fuzz list --fuzz-dir .)
+[ -n "$targets" ] || {
+    echo "cargo fuzz list found no fuzz target" >&2
+    exit 1
+}
+
+for target in $targets; do
     seeds="seeds/$target"
-    [ -d "$seeds" ] || {
+    [ -n "$(find "$seeds" -type f -print -quit 2>/dev/null)" ] || {
         echo "fuzz target $target has no seeds in fuzz/$seeds" >&2
         exit 1
     }
@@ -24,3 +32,4 @@ for target in $(cargo fuzz list --fuzz-dir .); do
     cargo fuzz run --fuzz-dir . "$target" "$work/$target" "$seeds" -- \
         -runs="$runs" -seed=1 -max_len=4096
 done
+echo "fuzz smoke: $(echo "$targets" | wc -w) target(s), $runs runs each"

@@ -179,8 +179,8 @@ proptest! {
         );
     }
 
-    /// REQ-PROTO-014: encoding into a buffer that is too small fails and
-    /// reports both sizes.
+    /// REQ-PROTO-014: encoding into a buffer that is too small fails,
+    /// reports both sizes and writes nothing.
     #[test]
     fn req_proto_014_small_buffer_refused(
         message in message(),
@@ -188,11 +188,13 @@ proptest! {
     ) {
         let needed = message.encoded_len();
         let available = size.index(needed);
-        let mut buffer = vec![0; available];
+        let untouched = vec![0xa5; available];
+        let mut buffer = untouched.clone();
         prop_assert_eq!(
             message.encode(&mut buffer),
             Err(EncodeError::BufferTooSmall { needed, available })
         );
+        prop_assert_eq!(buffer, untouched);
     }
 
     /// REQ-PROTO-013: a session identifier with any byte outside ASCII

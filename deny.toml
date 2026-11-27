@@ -60,6 +60,9 @@ deny = [
   { crate = "chrono", wrappers = [
     "i-slint-core",
   ], reason = "Unmaintained. Tolerated only as a dependency Slint forces on the shell." },
+  # calloop's `signals` feature depends on nix. The compositor must build
+  # calloop without it (signalfd through rustix), or this ban is revisited as
+  # an explicit decision; it must not be lifted just to import a prototype.
   { crate = "nix", reason = "rustix covers the system calls we need with less unsafe code." },
   { crate = "image", reason = "Decodes many formats we never show; use png." },
   { crate = "resvg", reason = "Icons are prepared as PNG or Slint paths ahead of time." },

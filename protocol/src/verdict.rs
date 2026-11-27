@@ -23,8 +23,13 @@ pub struct LockEpoch(pub u64);
 pub struct Attempt(pub u32);
 
 /// Identifier of the login session: 1 to [`SessionId::MAX_LEN`] ASCII letters
-/// and digits, which is the form of the identifiers logind hands out, such as
-/// `3` or `c2`.
+/// and digits.
+///
+/// The length and the alphabet are a restriction of this protocol, not a
+/// property of logind. logind treats session identifiers as opaque strings;
+/// the ones it hands out today, such as `3` or `c2`, fit. A session whose
+/// identifier does not fit cannot be named in a verdict, so it cannot be
+/// unlocked through this protocol: the session stays locked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId {
     len: u8,

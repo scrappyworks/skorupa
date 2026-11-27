@@ -63,23 +63,23 @@
         root = ./.;
         fileset = rustFiles;
       };
-      # The scripts behind `just budget` and `just req-lint`, with the Rust
-      # they count and read. docs/ joins once it holds the requirement list.
+      # What `just budget` and `just req-lint` read: every Rust file of the
+      # tree, wherever it lies, so that code outside a budgeted component is
+      # seen, plus the requirement catalog and the Quint model once they
+      # exist. A flake source holds tracked files only, so "every" means every
+      # tracked one.
       scriptSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions (
           [
             ./budget.toml
             ./scripts
-            ./protocol
-            ./shell
-            ./lock
-            ./sandbox
-            ./sim
-            ./compositor
-            ./fuzz
+            (lib.fileset.fileFilter (file: file.hasExt "rs") ./.)
+            (lib.fileset.maybeMissing ./docs/requirements.md)
           ]
-          ++ lib.optional (builtins.pathExists ./docs) ./docs
+          ++ lib.optional (builtins.pathExists ./spec) (
+            lib.fileset.fileFilter (file: file.hasExt "qnt") ./spec
+          )
         );
       };
 
@@ -217,8 +217,8 @@
           }
         );
 
-        budget = script "budget" [ pkgs.python3 pkgs.tokei ] "python3 scripts/budget.py";
-        req-lint = script "req-lint" [ pkgs.python3 ] "python3 scripts/req-lint.py";
+        budget = script "budget" [ pkgs.python3 pkgs.tokei ] "python3 -B scripts/budget.py";
+        req-lint = script "req-lint" [ pkgs.python3 ] "python3 -B scripts/req-lint.py";
       };
 
       devShells.${system} = {

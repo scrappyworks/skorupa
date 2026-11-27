@@ -79,12 +79,17 @@ impl Message {
     /// # Errors
     ///
     /// Returns [`EncodeError::BufferTooSmall`] if `out` is shorter than
-    /// [`Self::encoded_len`]. The contents of `out` are then unspecified.
+    /// [`Self::encoded_len`]. Nothing is written in that case: `out` keeps
+    /// its contents, so a short buffer never holds part of a frame.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, EncodeError> {
         let needed = self.encoded_len();
         let available = out.len();
-        self.write(out, needed)
-            .ok_or(EncodeError::BufferTooSmall { needed, available })
+        let too_small = EncodeError::BufferTooSmall { needed, available };
+        // Judged before the first byte is written.
+        if available < needed {
+            return Err(too_small);
+        }
+        self.write(out, needed).ok_or(too_small)
     }
 
     fn write(&self, out: &mut [u8], needed: usize) -> Option<usize> {
