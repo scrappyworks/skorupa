@@ -31,8 +31,25 @@ fn map(window: u64, app_id: Option<&str>, parent: Option<u64>, valid_token: bool
         window: w(window),
         app_id: app_id.map(str::to_owned),
         parent: parent.map(w),
+        parent_same_client: true,
         valid_token,
     }
+}
+
+/// A dialog whose parent belongs to another client (xdg-foreign).
+fn foreign(window: u64, parent: u64, valid_token: bool) -> Event {
+    Event::Map {
+        window: w(window),
+        app_id: None,
+        parent: Some(w(parent)),
+        parent_same_client: false,
+        valid_token,
+    }
+}
+
+fn drawn(layout: &Layout) -> Vec<u64> {
+    let windows = layout.project().windows;
+    windows.iter().map(|placed| placed.window.0).collect()
 }
 
 /// An independent window the user launched.
@@ -122,12 +139,45 @@ fn req_layout_006_map_without_a_token_takes_neither_focus_nor_view() {
     assert_eq!(tiles(&after), [vec![1], vec![2], vec![]]);
     assert_eq!((after.active(), after.focus()), (0, Some(w(1))));
     assert!(!effects.iter().any(|e| matches!(e, Effect::Focus(_))));
+}
 
-    // Nothing is focused on an empty workspace, and that is still no reason
-    // to hand the keyboard to a client that was not asked for.
-    let alone = run(start(), [map(1, None, None, false)]);
-    assert_eq!(tiles(&alone), [vec![], vec![1], vec![]]);
-    assert_eq!((alone.active(), alone.focus()), (0, None));
+#[test]
+fn req_layout_006_window_mapped_while_nothing_is_focused_is_shown_and_focused() {
+    // Session start: there is no focus to steal and no view to take.
+    let (alone, effects) = step(start(), map(1, None, None, false));
+    assert_eq!(tiles(&alone), [vec![1], vec![]]);
+    assert_eq!((alone.active(), alone.focus()), (0, Some(w(1))));
+    assert!(effects.contains(&Effect::Focus(Some(w(1)))));
+
+    // The same on a workspace the user emptied and still looks at.
+    let emptied = [open(1), open(2), Event::WorkspaceUp, Event::Unmap(w(1))];
+    let before = run(start(), emptied);
+    let after = run(before.clone(), [map(3, None, None, false)]);
+    // [3]* [2] []
+    assert_eq!(tiles(&after), [vec![3], vec![2], vec![]]);
+    assert_eq!((after.active(), after.focus()), (0, Some(w(3))));
+    assert_eq!(after.workspaces()[0].id, before.workspaces()[0].id);
+
+    // A dialog still goes to its parent, wherever that is.
+    let dialog = run(before, [map(3, None, Some(2), false)]);
+    assert_eq!(tiles(&dialog), [vec![], vec![2], vec![]]);
+    assert_eq!((dialog.active(), dialog.focus()), (0, None));
+}
+
+#[test]
+fn req_layout_006_dialog_with_a_foreign_parent_needs_a_token() {
+    let before = run(start(), [open(1)]);
+    let (after, effects) = step(before.clone(), foreign(2, 1, false));
+    // It is a dialog of 1 all the same, only without the keyboard.
+    assert_eq!(
+        (after.parent(w(2)), after.home(w(2))),
+        (Some(w(1)), Some(0))
+    );
+    assert_eq!(after.focus(), Some(w(1)));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Focus(_))));
+
+    let granted = run(before, [foreign(2, 1, true)]);
+    assert_eq!(granted.focus(), Some(w(2)));
 }
 
 #[test]
@@ -194,6 +244,24 @@ fn req_layout_004_closing_a_dialog_returns_the_keyboard_to_its_parent() {
     assert_eq!((mru(&layout), layout.focus()), (vec![3, 2, 1], Some(w(3))));
     let closed = run(layout, [Event::Unmap(w(3))]);
     assert_eq!(closed.focus(), Some(w(1)));
+}
+
+#[test]
+fn req_layout_004_focused_dialog_is_drawn_above_every_sibling_branch() {
+    let nested = [map(2, None, Some(1), false), map(3, None, Some(2), false)];
+    let layout = run(start(), [open(1)].into_iter().chain(nested));
+    // 1 has the dialog 2, which has the dialog 3. A second dialog of 1 is
+    // activated: nothing of the older branch may cover it.
+    let layout = run(layout, [map(4, None, Some(1), true)]);
+    assert_eq!(layout.focus(), Some(w(4)));
+    assert_eq!(drawn(&layout), [1, 2, 3, 4]);
+
+    // Raising 2 raises its branch; its own dialog stays above it.
+    let layout = run(layout, [Event::FocusWindow(w(2))]);
+    assert_eq!(drawn(&layout), [1, 4, 2, 3]);
+    // Once the focus is gone, the branches keep the order of their use.
+    let used = [Event::FocusSettled(w(2)), Event::FocusWindow(w(1))];
+    assert_eq!(drawn(&run(layout, used)), [1, 4, 2, 3]);
 }
 
 #[test]
@@ -374,6 +442,12 @@ fn req_layout_014_fullscreen_covers_the_output_and_restores_the_pair() {
     // Workspace navigation leaves and returns without ending fullscreen.
     let away = run(full.clone(), [Event::WorkspaceDown, Event::WorkspaceUp]);
     assert_eq!(away.workspaces(), full.workspaces());
+
+    // The pointer cannot enter a window that is not drawn.
+    assert_eq!(
+        step(full.clone(), Event::Hover(w(1))),
+        (full.clone(), vec![])
+    );
 
     let alone = run(full, [Event::Unmap(w(1)), Event::ToggleFullscreen]);
     assert_eq!(alone.configure(w(2)), Some(configure(WORK, true)));

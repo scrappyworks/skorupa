@@ -40,12 +40,8 @@ fn window() -> impl Strategy<Value = WindowId> {
 
 fn event() -> impl Strategy<Value = Event> {
     let app_id = select(vec![None, Some("a".to_owned()), Some("b".to_owned())]);
-    let map = (
-        window(),
-        app_id,
-        proptest::option::of(window()),
-        any::<bool>(),
-    );
+    let parent = (proptest::option::of(window()), any::<bool>());
+    let map = (window(), app_id, parent, any::<bool>());
     let side = prop_oneof![-2..=3000i32, MAX_OUTPUT_SIDE - 1..=MAX_OUTPUT_SIDE + 1];
     let commands = select(vec![
         Event::FocusLeft,
@@ -66,11 +62,8 @@ fn event() -> impl Strategy<Value = Event> {
         Event::SwitcherCancel,
     ]);
     prop_oneof![
-        5 => map.prop_map(|(window, app_id, parent, valid_token)| Event::Map {
-            window,
-            app_id,
-            parent,
-            valid_token,
+        5 => map.prop_map(|(window, app_id, (parent, parent_same_client), valid_token)| {
+            Event::Map { window, app_id, parent, parent_same_client, valid_token }
         }),
         2 => window().prop_map(Event::Unmap),
         1 => (window(), any::<bool>())
@@ -110,6 +103,44 @@ fn inside(inner: Rect, outer: Rect) -> bool {
         && inner.y >= outer.y
         && inner.x + inner.w <= outer.x + outer.w
         && inner.y + inner.h <= outer.y + outer.h
+}
+
+/// Whether `window` is `ancestor` or one of its dialogs, at any depth.
+fn descends(layout: &Layout, window: WindowId, ancestor: WindowId) -> bool {
+    let mut hops = layout.mru().len();
+    let mut at = Some(window);
+    while let Some(current) = at.filter(|&current| current != ancestor) {
+        hops = hops.checked_sub(1).unwrap();
+        at = layout.parent(current);
+    }
+    at.is_some()
+}
+
+/// The focus that a map or an activation request without a valid token
+/// leaves: the one before, with the two exceptions of REQ-LAYOUT-006.
+fn focus_after_tokenless(before: &Layout, event: &Event) -> Option<WindowId> {
+    let mapped = |window: WindowId| before.home(window).is_some();
+    match *event {
+        Event::Map {
+            window,
+            parent,
+            parent_same_client,
+            ..
+        } if !mapped(window) => {
+            let dialog = parent.filter(|&parent| mapped(parent));
+            // A dialog takes the keyboard from its own parent, if both
+            // belong to one client.
+            let from_parent = dialog.is_some() && dialog == before.focus() && parent_same_client;
+            // Nothing is focused: an independent window may as well be.
+            let unopposed = dialog.is_none() && before.focus().is_none();
+            if from_parent || unopposed {
+                Some(window)
+            } else {
+                before.focus()
+            }
+        }
+        _ => before.focus(),
+    }
 }
 
 /// Sharing an edge is not overlapping.
@@ -256,6 +287,17 @@ fn check_projection(layout: &Layout, mapped: &BTreeSet<WindowId>) -> Result<(), 
             prop_assert!(tiles.clone().all(|p| !overlap(p.rect, placed.rect)));
         }
     }
+
+    // REQ-LAYOUT-004: nothing of a sibling branch covers the window that has,
+    // or on its workspace would have, the keyboard: above it in its tile are
+    // only its own dialogs.
+    for focus in spaces.iter().filter_map(|ws| ws.focus) {
+        let at = drawn.iter().position(|&window| window == focus).unwrap();
+        let tile = root(layout, focus);
+        let same_tile = |window: &&WindowId| root(layout, **window) == tile;
+        let mut above = drawn[at + 1..].iter().filter(same_tile);
+        prop_assert!(above.all(|&window| descends(layout, window, focus)));
+    }
     Ok(())
 }
 
@@ -335,8 +377,9 @@ proptest! {
                 Event::Map { valid_token: false, .. } | Event::Activate { valid_token: false, .. }
             );
             if tokenless {
-                let view = |l: &Layout| (l.workspaces()[l.active()].id, l.focus().map(|f| root(l, f)));
+                let view = |l: &Layout| l.workspaces()[l.active()].id;
                 prop_assert_eq!(view(&layout), view(&after));
+                prop_assert_eq!(after.focus(), focus_after_tokenless(&layout, &event));
             }
             layout = after;
         }

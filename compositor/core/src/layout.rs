@@ -16,9 +16,19 @@
 //!
 //! Only the user adds a column ([`Event::SplitWith`]). A client can map,
 //! unmap and ask for activation; without a valid activation token none of
-//! these moves the focus to another tile or changes the active workspace.
-//! The one exception is a dialog whose parent has the focus: it takes the
-//! keyboard from its own parent.
+//! these moves the focus to another window or changes the active workspace.
+//! There are two exceptions, and neither takes the keyboard from another
+//! client:
+//!
+//! - A dialog whose parent has the focus takes the keyboard from it, if the
+//!   adapter says that both belong to one client. A dialog with a parent
+//!   imported from another client (xdg-foreign) needs a token like any
+//!   other window.
+//! - While nothing is focused, that is on an empty active workspace, a new
+//!   independent window opens on that workspace and gets the focus, so that
+//!   a session can start its applications. This is the proposed answer to
+//!   open decision O-20, awaiting the owner. With any window on screen, a
+//!   new independent window opens a workspace directly below.
 //!
 //! # Empty workspaces
 //!
@@ -95,6 +105,10 @@ pub enum Event {
         window: WindowId,
         app_id: Option<String>,
         parent: Option<WindowId>,
+        /// The parent is a toplevel of the same client. False for a parent
+        /// imported from another client (xdg-foreign). Unused without a
+        /// parent.
+        parent_same_client: bool,
         /// The map carries an activation token from a real user interaction.
         valid_token: bool,
     },
@@ -380,13 +394,30 @@ impl Layout {
             (h - card_h) / 2 - int(self.active) * pitch,
         );
 
-        // Dialogs of one tile, parents before children and the most recently
-        // used of equals last, so that it is drawn on top.
-        let mut dialogs: Vec<(WindowId, usize, usize, WindowId)> = Vec::new();
-        for (age, &window) in self.mru.iter().rev().enumerate() {
-            let depth = self.chain(window).count() - 1;
-            if depth > 0 {
-                dialogs.push((self.tile_of(window), depth, age, window));
+        // Dialogs are drawn branch by branch, each above its parent. Of
+        // sibling branches the one used last is on top; the branch with the
+        // remembered focus counts as used last, because the history lags
+        // behind the focus. A branch is as recent as its most recent window.
+        let focused =
+            |window: &WindowId| self.workspaces.iter().any(|ws| ws.focus == Some(*window));
+        let mut recency: BTreeMap<WindowId, usize> = BTreeMap::new();
+        for (age, window) in self.mru.iter().rev().enumerate() {
+            let age = if focused(window) { usize::MAX } else { age };
+            for member in self.chain(*window) {
+                let branch = recency.entry(member).or_default();
+                *branch = age.max(*branch);
+            }
+        }
+        // Sorted by the recency of each branch on the way down from the
+        // tile, a parent comes right before its branches.
+        let mut dialogs: Vec<(WindowId, Vec<usize>, WindowId)> = Vec::new();
+        for &window in &self.mru {
+            let mut path: Vec<WindowId> = self.chain(window).collect();
+            if let Some(tile) = path.pop()
+                && !path.is_empty()
+            {
+                let down = path.iter().rev().filter_map(|member| recency.get(member));
+                dialogs.push((tile, down.copied().collect(), window));
             }
         }
         dialogs.sort_unstable();
@@ -424,7 +455,7 @@ impl Layout {
                 let above = dialogs.iter().filter(|dialog| dialog.0 == tile);
                 projection
                     .windows
-                    .extend(above.map(|dialog| placed(dialog.3, true)));
+                    .extend(above.map(|dialog| placed(dialog.2, true)));
             }
         }
         projection
@@ -550,9 +581,12 @@ impl Layout {
                 window,
                 app_id,
                 parent,
+                parent_same_client,
                 valid_token,
             } => {
-                self.map(window, app_id, parent, valid_token, effects);
+                // A parent of another client lends its place, not its focus.
+                let heir = parent.filter(|_| parent_same_client);
+                self.map(window, app_id, parent, heir, valid_token, effects);
             }
             Event::Unmap(window) => self.unmap(window),
             Event::Activate {
@@ -567,7 +601,11 @@ impl Layout {
             Event::Hover(window) => {
                 // Hover never changes what is shown, so it reaches only
                 // windows that are on screen at their place.
-                let on_screen = !self.overview && self.switcher.is_none();
+                let ws = &self.workspaces[self.active];
+                let covered = ws
+                    .fullscreen
+                    .is_some_and(|tile| tile != self.tile_of(window));
+                let on_screen = !self.overview && self.switcher.is_none() && !covered;
                 if on_screen && self.home(window) == Some(self.active) {
                     self.workspaces[self.active].focus = Some(window);
                 }
@@ -631,6 +669,7 @@ impl Layout {
         window: WindowId,
         app_id: Option<String>,
         parent: Option<WindowId>,
+        focus_heir_of: Option<WindowId>,
         valid_token: bool,
         effects: &mut Vec<Effect>,
     ) {
@@ -653,10 +692,15 @@ impl Layout {
             let ws = &mut self.workspaces[home];
             // A dialog takes the keyboard from its own parent and from no
             // other window.
-            if valid_token || ws.focus == parent {
+            if valid_token || ws.focus == focus_heir_of {
                 ws.focus = Some(window);
             }
             home
+        } else if self.workspaces[self.active].tiles.is_empty() {
+            // Nothing is focused, so there is no focus to steal: `settle`
+            // gives it to the only window here (proposed for O-20).
+            self.workspaces[self.active].tiles.push(window);
+            self.active
         } else {
             self.insert_workspace(self.active + 1, vec![window], Some(window));
             self.active + 1
