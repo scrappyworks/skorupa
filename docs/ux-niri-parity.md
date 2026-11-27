@@ -1,5 +1,11 @@
 # Skorupa compositor UX parity with niri
 
+**Status.** Specification from niri's source and configuration; nothing here was run. Three launch
+behaviors are proposals awaiting the owner: dropping a window on an occupied overview card,
+touch-only overview entry, and the region-recording fallback. Region recording has no v1
+disposition yet; parity is claimed only once it has one and an acceptance test that inspects the
+delivered stream.
+
 | Feature | Skorupa startup behavior | Adaptation | niri size reference | Estimated Skorupa Rust LOC |
 |---|---|---|---:|---:|
 | Hot corners | Enter either top corner to toggle overview | Same | 43 lines for the hit test, plus input dispatch | 50–90 |
