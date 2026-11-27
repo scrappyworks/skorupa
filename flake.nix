@@ -150,7 +150,16 @@
         );
 
       main = workspace "main" ".";
-      compositor = workspace "compositor" "compositor";
+      # Smithay links two C libraries: Pixman for the software renderer and
+      # libxkbcommon for the keymap. Neither crate asks pkg-config; the
+      # linker finds them through buildInputs.
+      compositorLibs = [
+        pkgs.pixman
+        pkgs.libxkbcommon
+      ];
+      compositor = workspace "compositor" "compositor" // {
+        buildInputs = compositorLibs;
+      };
       fuzz = workspace "fuzz" "fuzz";
 
       # Release build of a whole workspace. The placeholder crates have no
@@ -255,6 +264,7 @@
             # the host architecture only; full qemu adds every emulated one.
             pkgs.qemu_kvm
           ];
+          buildInputs = compositorLibs;
           # wlcs installs its test runner outside bin/.
           WLCS_BIN = "${pkgs.wlcs}/libexec/wlcs/wlcs";
         };
