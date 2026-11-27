@@ -6,7 +6,8 @@ Skorupa is a small Wayland desktop for one laptop screen. Its parts run as separ
 
 - Keep passwords in `lock/`. Only its auth broker unlocks the session, and every error keeps it locked.
 - Give clients nothing by default. Every Wayland protocol and IPC call needs a grant, checked on each request. Never treat a UID, PID, app id, or D-Bus name as an identity.
-- Draw consent, password, and lock screens in the compositor, above every client.
+- `lock/ui` draws consent, password, and lock screens; the compositor keeps them above every client and routes their input.
+- Unlock only on a verdict from `lock/authd`, never on a request from `lock/ui`.
 - Agents get no clipboard, screen capture, or input unless granted for one window and a limited time.
 - Support one screen with AMD or Intel graphics on Mesa. Do not add NVIDIA, X11, XWayland, or multi-screen code.
 - Prefer the kernel, systemd, logind, and existing daemons over new code. Justify every new protocol, option, and dependency.
