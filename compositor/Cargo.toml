@@ -5,10 +5,9 @@
 # cannot share them between workspaces. Change them together.
 [workspace]
 resolver = "3"
+members = [".", "core"]
 
-[package]
-name = "skorupa-compositor"
-description = "Wayland compositor for one screen."
+[workspace.package]
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.100"
@@ -16,18 +15,17 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/scrappyworks/skorupa"
 publish = false
 
-[dependencies]
-# Smithay is not a dependency yet. It arrives pinned to a git revision
-# together with the first backend code; deny.toml already allows its source.
+[workspace.dependencies]
+proptest = { version = "1.9", default-features = false, features = ["std"] }
+skorupa-compositor-core = { path = "core" }
 skorupa-protocol = { path = "../protocol" }
 
-[lints.rust]
-# `forbid` until the audited module that calls Smithay's unsafe GPU
-# constructor exists. That change lowers this to `deny` and allows the lint in
-# that one module only.
+[workspace.lints.rust]
+# No exceptions. GPU bring-up goes through Smithay's `GbmGlesBackend`, which
+# keeps the unsafe EGL and GLES constructor calls inside Smithay.
 unsafe_code = "forbid"
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 dbg_macro = "warn"
 todo = "warn"
@@ -35,6 +33,25 @@ unimplemented = "warn"
 expect_used = "warn"
 panic = "warn"
 unwrap_used = "warn"
+
+[package]
+name = "skorupa-compositor"
+description = "Wayland compositor for one screen."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Smithay is not a dependency yet. It arrives pinned to a git revision
+# together with the first backend code; deny.toml already allows its source.
+skorupa-compositor-core.workspace = true
+skorupa-protocol.workspace = true
+
+[lints]
+workspace = true
 
 [profile.release]
 overflow-checks = true
