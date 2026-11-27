@@ -9,3 +9,4 @@
 /result
 /result-*
 __pycache__/
+/spec/_apalache-out/
