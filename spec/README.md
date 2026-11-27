@@ -10,23 +10,41 @@ no interleaving of messages, crashes, failed page flips and suspends unlocks
 the session, shows it, or delivers it to a client that has lost its grant.
 
 - `lock.qnt`: the model, its invariants, tests and counterexample traces.
-- `variants.qnt`: the chosen design for v1 (`chosen`), 20 variants that each
-  remove one rule, the post-v1 option `post_v1_agent_capture`, and one
-  candidate rule (`option_sleep_hold`). One of the 20 is the rejected design
-  in which the lock client unlocks the session itself.
+- `variants.qnt`: the instances on which every invariant must hold. `chosen`
+  is the design for v1, `post_v1_agent_capture` adds the option planned after
+  v1, and `env_resettle_flip` is the chosen design under a weaker assumption
+  about the kernel.
+- `ablations.qnt`: 28 variants that each remove one rule. One of them is the
+  rejected design in which the lock client unlocks the session itself.
+
+The variants are in a file of their own because of the tool: with all 31
+instances in one file the flattened model is too large for `quint verify`
+0.33.1, which then exits with status 0 and prints no verdict (finding 14).
 
 ## Results in short
 
-- The model exercises 15 safety predicates. The recorded runs below distinguish
+- The model checks 23 safety predicates. The recorded runs below distinguish
   random sampling, bounded symbolic checking and explicit-state search.
-- All 20 variants are refuted, each by a random simulation and by a short
+- All 28 variants are refuted, each by a random simulation and by a short
   hand-written trace. The rejected `ext-session-lock` design is refuted in
-  4 steps, and Apalache confirms that no shorter trace exists.
-- The chosen design does **not** guarantee that the machine only sleeps with
-  the panel covered, even after it acknowledged the lock for that sleep.
-  A candidate rule for the acknowledged case is modelled. Its first version
-  was refuted by the simulator; the amended one passed 400 000 traces.
-  See [Findings](#findings).
+  4 steps.
+- The open questions of the first validation are decided, and each decision
+  is a rule in the chosen design, an invariant in `safety`, and a variant
+  that removes the rule and fails:
+  - A sleep acknowledgement is a commitment (the **sleep hold**,
+    REQ-LOCK-026). The machine no longer sleeps with the session on the panel
+    once the compositor acknowledged the lock for that sleep, and the
+    inhibitor is no longer released with the session visible.
+  - A resume, and a returning output, void the presentation of the lock. No
+    unlock attempt opens before a lock frame of the current wake period is on
+    the enabled output (REQ-LOCK-015, REQ-LOCK-010).
+  - Nothing is delivered to a grant holder while a trusted prompt is open
+    (REQ-TRUST-006).
+  - `authd` judges each binding once (REQ-AUTH-019).
+- One limit stays, and no rule of Skorupa can remove it: logind suspends
+  without an acknowledgement when its delay runs out or when no inhibitor is
+  held. `strongS_sleepCovered` fails in two steps on every design. What holds
+  then is REQ-LOCK-012. See [Findings](#findings).
 
 ## How to run
 
@@ -51,7 +69,7 @@ the capture observation in the post-v1 instance. See the
 # Types and names.
 quint typecheck variants.qnt
 
-# Scenario, guard and progress tests on the chosen design (32 tests).
+# Scenario, guard and progress tests on the chosen design (61 tests).
 quint test --main=chosen variants.qnt
 
 # Random simulation of the chosen design against all invariants.
@@ -61,24 +79,37 @@ quint run variants.qnt --main=chosen --invariant=safety \
 # The same with a per-invariant report and witness counts.
 quint run variants.qnt --main=chosen --max-samples=100000 --max-steps=100 --n-threads=4 \
   --invariants propA_verdict propA_pam propA_typed propA_wake propA_broker \
-    propB_covered propB_phase propB_resume propS_sleep propC_noLateDelivery \
-    propC_lockRevokes propC_consent propC_stopExact propD_agent propD_v1 \
+    propA_onePam propB_covered propB_phase propB_resume propB_firstSubmit \
+    propB_shown propS_sleep propS_committed propS_release propS_ackedSleepCovered \
+    propS_crashKeepsDelay propC_noLateDelivery propC_lockRevokes propC_consent \
+    propC_stopExact propD_agent propD_v1 propT_noDelivery \
   --witnesses witUnlock witAck witGrant witDelivery witDrop witSleepByAck \
     witNegativeVerdict witSecondEpoch witSecondInstance witUnlockAfterResume \
-    witStaleFlip witStop witTransferGrant witCaptureGrant reachInst reachEpoch reachAttempt \
-    reachAsk reachGrant reachJob reachWin reachConn reachSleep
+    witStaleFlip witStop witTransferGrant witCaptureGrant witHold witCommitted \
+    witHoldReport witSleepFailed witSuppressed witAckedSuspend witUncoveredSuspend \
+    witStaleRecord reachInst reachEpoch reachAttempt reachAsk reachGrant reachJob \
+    reachWin reachConn reachSleep reachReq
 
 # Fault storm: each group occurs once in the scheduler.
 quint run variants.qnt --main=chosen --step=stepStorm --invariant=safety \
   --max-samples=50000 --max-steps=100 --n-threads=4
 
 # The rejected design violates safety. Its fixed test identifies propA_verdict.
-quint run variants.qnt --main=rejected_client_unlock --invariant=safety
+quint run ablations.qnt --main=rejected_client_unlock --invariant=safety
 
 # Its hand-written counterexample as a test. Every variant has one.
-quint test --main=rejected_client_unlock --match=counterexample variants.qnt
+quint test --main=rejected_client_unlock --match=counterexample ablations.qnt
+
+# No counterexample trace runs on the chosen design (34 failures expected).
+quint test --main=chosen --match=cx_ variants.qnt
+
+# The chosen design under the weaker kernel assumption.
+quint run variants.qnt --main=env_resettle_flip --invariant=safety \
+  --max-samples=50000 --max-steps=100
 
 # Bounded symbolic check with Apalache (heavy: run it through the job queue).
+# Check that the output ends in "[ok] No violation found": a model that is too
+# large for the CLI makes this command exit 0 without a verdict.
 quint verify variants.qnt --main=chosen --invariant=safety --max-steps=6
 
 # Explicit-state search with TLC (limit wall time and disk for this open-ended search).
@@ -94,11 +125,15 @@ whether the replay used the intended model.
 [Tagged evaluator](https://github.com/quint-co/quint/blob/v0.33.1/evaluator/src/main.rs)
 
 `quint test` selects names ending in `Test` by default. Use
-`--match=counterexample` on rejected designs, and check the count. The
-0.33.1 CLI exits successfully for an empty match. Run all tests on
-`post_v1_agent_capture`, and select `'ProgressTest|sleepHold.*Test'` on the
-hold option. For sampled progress tests, a seed alone selects one sample.
-Pass `--max-samples=10000` with a seed for the full batch.
+`--match=counterexample` on the variants in `ablations.qnt`, and check the
+count. The 0.33.1 CLI exits successfully for an empty match. Run all tests on
+`post_v1_agent_capture`, and `--match=envResettle` on `env_resettle_flip`
+(`settledFlipAcrossTwoSleepsTest` states the assumption that this instance
+drops, so it fails there by design). For sampled progress tests, a seed alone
+selects one sample. Pass `--max-samples=10000` with a seed for the full batch.
+
+`DEFECT` is a sum type (`defects.Defect` in `lock.qnt`). A misspelt variant
+name is a type error, where a string would have selected the chosen design.
 
 ## Scope
 
@@ -106,20 +141,21 @@ Processes and what the model keeps of each:
 
 | Process | Modelled | Left out |
 | --- | --- | --- |
-| compositor | lock phase, epoch, attempt, instance id, consent prompt, grant table; restart loses all of it | layout, input routing, rendering |
-| kernel (KMS) | frame on the panel, one pending page flip, flip success and failure, output off and on; a flip pending at suspend is shown before the sleep or dropped, and its event arrives after the resume | modes, planes, more than one output |
+| compositor | lock phase, epoch, attempt, instance id, sleep hold and its token, consent prompt, grant table; restart loses all of it | layout, input routing, rendering |
+| kernel (KMS) | frame on the panel, one pending page flip, flip success and failure, output off and on (by a fault, or by the compositor after failed lock frames); a flip pending at suspend is shown before the sleep or dropped, and its event arrives after the resume | modes, planes, more than one output |
 | `lock/ui` | one process and one credential channel per attempt; crash; the secret it forwards is right or wrong | drawing, keyboard handling |
 | `authd` | current challenge, one credential per selection of that challenge, restart loses both and closes the compositor's open attempt | polkit sessions, rate limiting |
 | `pwcheck` | one PAM result per request; a crash is a missing result | PAM itself |
-| logind and bridge | sleep announcement, delay inhibitor, its timeout, suspend, resume, bridge crash and restart, `Unlock` signal | idle hints, `Lock` as a separate signal (folded into `compLock`), polkit |
-| portal, agent | one grant per holder, bound to a window generation and a connection; reconnect; queued delivery effects; Stop requests that name a stream generation. Holders: portal stream, agent clipboard transfer, and agent capture of a host window, which exists only with `AGENT_CAPTURE = true` (after v1) | PipeWire, the content of frames, clipboard data |
+| logind and bridge | sleep announcement, delay inhibitor, its timeout, suspend, resume, a sleep that fails without a suspend, bridge crash and restart with the inhibitor kept in the service manager's descriptor store, loss of that store, a new inhibitor after a sleep, the report that ends the sleep hold, `Unlock` signal | idle hints, `Lock` as a separate signal (folded into `compLock`), polkit |
+| portal, agent | one grant per holder, bound to a window generation and a connection; reconnect and the compositor's handling of it; queued delivery effects; trusted mode while a consent prompt is open; a prompt closed without an answer; Stop requests that name a stream generation. Holders: portal stream, agent clipboard transfer, and agent capture of a host window, which exists only with `AGENT_CAPTURE = true` (after v1) | PipeWire, the content of frames, clipboard data |
 | clocks | "CLOCK_BOOTTIME ran ahead of CLOCK_MONOTONIC" as one flag set by resume; a grant deadline that passes | numeric time |
 
 Faults: every message stays deliverable forever, which covers loss,
 duplication, reordering and messages that outlive a restart of either end;
 crash and restart of compositor, `lock/ui`, `authd`, bridge, portal and agent;
 a missing `pwcheck` result; failed render, failed page flip, output off;
-inhibitor timeout; suspend at any point where logind allows it.
+inhibitor timeout; a bridge unit that the service manager gives up; a sleep
+that fails after it was announced; suspend at any point where logind allows it.
 
 Trust: the compositor, `authd`, `pwcheck` and the bridge follow their rules
 but may crash. `lock/ui` may send anything its channel allows, at any time. In
@@ -144,7 +180,12 @@ Abstractions that matter when reading a result:
   end of the stream); it would not be for a datagram or bus transport.
 - The kernel is assumed to settle a pending page flip when the machine goes
   to sleep, so that no frame submitted before the sleep reaches the panel
-  after it. This was not checked on the target machines.
+  after the compositor runs again, and a flip settled at one suspend stays
+  settled at the next. The second half follows from atomic KMS, where the
+  panel after a resume shows the committed state and only a commit changes
+  it. `env_resettle_flip` drops that half and `safety` still holds, so no
+  invariant rests on it. Neither half was checked on the target machines;
+  finding 15 names the test.
 - `compLock` stands for every lock trigger: shortcut, idle, logind `Lock`,
   and the lock request the bridge sends for a sleep.
 - The lock frame is drawn by the compositor from the UI surface or, without
@@ -164,14 +205,18 @@ Abstractions that matter when reading a result:
   | window generations | 2 | 90.56 % |
   | reconnects per holder | 1 | 92.25 % |
   | sleep cycles | 2 | 99.99 % |
+  | lock requests minted by the bridge (added with the decisions) | 4 | see the decision run |
 
   Those limits apply to the random scheduler. Progress suffixes call the
-  underlying actions directly. There is one window and one output. The nonce
-  `sl.nextReq` and message history can grow without limit even under `step`.
-  During one pending sleep, repeating `bridgeCrash`, `bridgeStart` and
-  `bridgeSeeSleep` mints another nonce each time. Depth-limited checks still
-  have finite search trees. Ordinary TLC breadth-first search on this
-  instance cannot terminate by exhausting the reachable states.
+  underlying actions directly. There is one window and one output. Before
+  the tenth bound the nonce `sl.nextReq` grew without limit: during one
+  pending sleep, repeating `bridgeCrash`, `bridgeStart` and `bridgeSeeSleep`
+  minted another nonce each time. With the bound every counter and every
+  message set is finite, so the instance has finitely many states. Four
+  nonces cover every relation the rules can tell apart: the current one, one
+  of an earlier bridge in the same sleep cycle, and one of an earlier cycle.
+  The state space is still far beyond what TLC explored in the recorded
+  runs.
 
 ## Properties
 
@@ -184,16 +229,24 @@ Abstractions that matter when reading a result:
 | A | `propA_typed` | the user typed the right secret into the UI of the attempt that unlocked | REQ-AUTH-018, REQ-TRUST-002 |
 | A | `propA_wake` | no unlock on an attempt opened before the last resume | REQ-AUTH-016, REQ-LOCK-025 |
 | A | `propA_broker` | no unlock on a verdict issued by an `authd` that has disconnected since | REQ-AUTH-017, REQ-AUTH-004 |
+| A | `propA_onePam` | one `authd` instance asks `pwcheck` at most once for one binding | REQ-AUTH-019 |
 | B | `propB_covered` | from the lock acknowledgement until an unlock by verdict the panel never shows session content | REQ-LOCK-002, REQ-LOCK-010, REQ-LOCK-014, REQ-LOCK-013 |
 | B | `propB_phase` | `Locked` in the compositor means acknowledged, with no session frame pending | REQ-LOCK-002 |
-| B | `propB_resume` | after a resume no session frame is submitted and none is presented before an unlock by verdict in the same wake period (the unconditional first-submission requirement is stronger) | REQ-LOCK-015, REQ-LOCK-016, REQ-LOCK-025 |
+| B | `propB_resume` | after a resume no session frame is submitted and none is presented before an unlock by verdict in the same wake period | REQ-LOCK-015, REQ-LOCK-016, REQ-LOCK-025 |
+| B | `propB_firstSubmit` | the first frame submitted after a resume, after a compositor start, and on an output that came back while the session was not unlocked, is a lock frame, whatever happened in between | REQ-LOCK-015, REQ-LOCK-010, REQ-LOCK-013 |
+| B | `propB_shown` | `Locked` on an enabled output means that a lock frame is on the panel; attempts open and verdicts are accepted only in that state (the guards are checked by the `...GuardTest` runs of finding 11) | REQ-LOCK-015, REQ-LOCK-010 |
 | sleep | `propS_sleep` | the bridge releases the delay inhibitor on an acknowledgement only if the compositor was `Locked` for that request | REQ-LOCK-018, REQ-LOCK-024 |
+| sleep | `propS_release` | at no release by acknowledgement is the session unlocked or a session frame on the panel | REQ-LOCK-018 |
+| sleep | `propS_committed` | once a compositor acknowledged a request of the pending sleep cycle the session is not `Unlocked` until that cycle is over, across compositor restarts | REQ-LOCK-026 |
+| sleep | `propS_ackedSleepCovered` | a suspend whose inhibitor was released by an acknowledgement, or that follows an acknowledgement of its cycle, begins without a session frame on the panel or pending | REQ-LOCK-018, REQ-LOCK-026 |
+| sleep | `propS_crashKeepsDelay` | a bridge crash never releases the delay inhibitor | REQ-LOCK-027 |
 | C | `propC_noLateDelivery` | nothing is delivered on a revoked grant; lock, resume, restart, Stop, expiry, a replaced window, a reconnect and the use of a one-shot grant are revocations | REQ-GRANT-013, REQ-GRANT-014, REQ-GRANT-008, REQ-GRANT-006, REQ-GRANT-007, REQ-LOCK-021 |
 | C | `propC_lockRevokes` | outside `Unlocked` the compositor holds no live grant and no open prompt | REQ-LOCK-021, REQ-GRANT-005 |
 | C | `propC_consent` | every grant has the user's allow for exactly that prompt | REQ-GRANT-015 |
 | C | `propC_stopExact` | a Stop ends only the stream generation it names | REQ-GRANT-008 |
 | D | `propD_agent` | an agent receives capture or a transfer only on a live grant, once per grant | REQ-AGENT-001, REQ-AGENT-005, REQ-CAP-011 |
 | D | `propD_v1` | without `AGENT_CAPTURE` no prompt, grant or delivery for agent capture of a host window exists | REQ-AGENT-001 |
+| trust | `propT_noDelivery` | nothing is delivered to a grant holder while a consent prompt is open | REQ-TRUST-006, REQ-GRANT-013 |
 
 Liveness is checked as bounded progress, not as a temporal formula. Each test
 runs 40 random steps with faults and then a fixed fault-free schedule:
@@ -201,16 +254,29 @@ runs 40 random steps with faults and then a fixed fault-free schedule:
 | Test | Claim | Requirement |
 | --- | --- | --- |
 | `lockAckProgressTest` | a lock request is acknowledged, the panel is covered and a pending sleep is released within 12 steps | lockAckProgress (proposed) |
-| `unlockProgressTest` | with the right secret the session unlocks within 20 steps | unlockProgress (proposed) |
+| `unlockProgressTest` | with the right secret the session unlocks within 24 steps (20 before the decisions) | unlockProgress (proposed) |
+| `worstCaseUnlockTest`, `worstCaseUnlockLowerBoundTest` | from a constructed worst state (failed sleep, hold, output off, crashed bridge, no UI) the fault-free schedule needs exactly 19 steps | unlockProgress (proposed) |
+| `holdEndsOnResumeTest`, `holdEndsAfterFailedSleepTest`, `unlockAfterResumeTest` | the hold ends by the clock jump without the bridge, and by the report after a failed sleep; the unlock follows | REQ-LOCK-026 |
+
+What the decisions cost in steps of the fault-free schedule: two after a
+resume (render and flip of the lock frame before the attempt opens; they were
+taken before as well, but the attempt could open in parallel), two after a
+compositor start (the report round trip), three after a failed sleep (new
+inhibitor, report, release), and one more when the output is off (it must come
+back before an attempt opens).
 
 Witnesses (`wit*`) exercise positive paths: a verified
 unlock, an acknowledgement, a grant, a delivery, a dropped delivery, a sleep
 released by acknowledgement, a negative verdict, a second epoch, a second
-compositor instance and an unlock after a resume are all reached.
+compositor instance, an unlock after a resume, the hold, its end by report, a
+failed sleep, a delivery suppressed by a prompt, a covered suspend after an
+acknowledgement and an uncovered suspend without one are all reached.
 
-Two stronger statements are in the model but outside `safety`, because the
-chosen design does not meet them: `strongS_sleepCovered` and
-`strongS_ackedSleepCovered`.
+`strongS_sleepCovered` (no suspend at all with a session frame on the panel)
+stays outside `safety`: no rule of the compositor or the bridge can make it
+hold while logind bounds the delay (finding 2, `unackedSleepResidualTest`).
+`strongS_ackedSleepCovered` is the earlier name of the statement that now
+holds as `propS_ackedSleepCovered`; it is kept so that old commands still run.
 
 ## Variants
 
@@ -241,6 +307,22 @@ trace on the chosen design.
 | `ablate_stale_flip` | a flip from before the sleep acknowledges nothing (`ack_stale_flip`) | 7 | `propB_covered` | `staleFlipAfterResumeGuardTest` |
 | `ablate_stop_generation` | Stop names the stream generation (`stop_by_holder`) | 8 | `propC_stopExact` | `staleStopGuardTest` |
 
+Variants added with the decisions:
+
+| Module | Rule removed (`DEFECT`) | Steps | Violates | Guard test on `chosen` |
+| --- | --- | --- | --- | --- |
+| `ablate_sleep_hold` | an acknowledgement for a sleep starts the hold (`NoSleepHold`) | 16, 17 | `propS_release`; `propS_ackedSleepCovered` | `noAttemptInHoldGuardTest`, `sleepHoldClosesGapGuardTest`, `ackedSleepCoveredTest` |
+| `ablate_hold_restart` | a new compositor instance starts in the hold (`HoldMemoryOnly`) | 17, 20 | `propS_committed`; `propS_ackedSleepCovered` | `sleepHoldSurvivesRestartGuardTest` |
+| `ablate_hold_token` | the report that ends the hold echoes the current token (`HoldAnyReport`) | 15 | `propS_committed` | `staleSleepOverGuardTest` |
+| `ablate_fd_store` | the inhibitor descriptor outlives the bridge process (`NoFdStore`) | 3 | `propS_crashKeepsDelay` | `bridgeCrashKeepsDelayGuardTest`, `bridgeRestartCoveredSleepTest` |
+| `ablate_fresh_lock` | a resume demotes `Locked` to `Locking` (`KeepLockedOnResume`) | 15 | `propB_firstSubmit` | `freshLockBeforeAttemptGuardTest` |
+| `ablate_shown_lock` | attempts and verdicts need an enabled output, and a returning output demotes `Locked` (`BlindAttempt`) | 12, 4 | `propB_firstSubmit`; `propB_shown` | `noBlindAttemptGuardTest`, `noBlindVerdictGuardTest`, `outputReturnsLockFirstTest` |
+| `ablate_trusted_mode` | no delivery while a prompt is open (`DeliverDuringPrompt`) | 6 | `propT_noDelivery` | `promptSuppressesDeliveryGuardTest`, `noEnqueueDuringPromptGuardTest` |
+| `ablate_challenge_order` | `authd` accepts only a later challenge (`ChallengeReplay`) | 13 | `propA_onePam` | `challengeReplayGuardTest` |
+
+The names in the `DEFECT` column of the first table are the old strings; the
+constructors are the same words in upper camel case (`ClientUnlock`, ...).
+
 Three additional scenarios distinguish the received message from other valid
 messages already in flight. On `ablate_instance`, a stale verdict breaks
 `propA_verdict` at step 20 and a stale Allow breaks `propC_consent` at
@@ -248,11 +330,14 @@ step 15. On `ablate_stale_ack` the stale nonce breaks `propS_sleep` at step
 24 even though both requests have acknowledgements. The second dispatch
 scenario uses an agent and breaks `propD_agent` at step 7.
 
-`option_sleep_hold` is not in this table: it adds a rule instead of removing
-one, and it is not part of the chosen design (finding 1).
+`option_sleep_hold` no longer exists: its rule is part of the chosen design,
+and `ablate_sleep_hold` removes it (finding 1).
 `post_v1_agent_capture` is the chosen design with `AGENT_CAPTURE = true`; all
 invariants must hold there, and `agentCaptureGateTest` checks the one-shot
 capture there and the refusal in `chosen`.
+`env_resettle_flip` removes no rule. It lets a flip that was dropped at one
+suspend be shown at a later one, which the kernel is assumed not to do
+(finding 15). `safety` must hold there as well.
 
 The rejected design, step by step (`cx_client_unlock`):
 
@@ -409,9 +494,9 @@ counts of traces with a witness state.
 
 ### Verification plan
 
-`chosen` binds `DEFECT = "none"` and `AGENT_CAPTURE = false`. The model
-states 15 safety predicates, two stronger sleep predicates and two progress
-schedules. There are no temporal formulas or separately specified universal
+`chosen` binds `DEFECT = NoDefect` and `AGENT_CAPTURE = false`. The model
+states 23 safety predicates, one stronger sleep predicate that is outside
+`safety` by decision, and three progress schedules. There are no temporal formulas or separately specified universal
 contracts for pure functions. For the broken designs a finite execution
 ending in the negated predicate suffices.
 
@@ -424,17 +509,23 @@ ending in the negated predicate suffices.
 | `propA_broker` | `verdictAfterBrokerDisconnectGuardTest` has an issued verdict across disconnect | Bounded checking plus the disconnect trace. Induction needs the open attempt's broker lifetime. |
 | `propB_covered` | `happyPathTest` sets `mustCover` | Bounded checking and flip ablations. An unbounded proof must relate both pending and visible frames to the lock. |
 | `propB_phase` | `happyPathTest` enters `Locked` after a flip | Bounded checking plus output-off and stale-completion paths. |
-| `propB_resume` | `resumeRelocksTest` presents a fresh lock frame | Bounded checking and the two-suspend regression. The catalog's first-submission condition is tested separately. |
+| `propB_resume` | `resumeRelocksTest` presents a fresh lock frame | Bounded checking and the two-suspend regression. |
+| `propB_firstSubmit` | `unlockAfterResumeTest` and `outputReturnsLockFirstTest` submit a lock frame first and unlock afterwards | Bounded checking plus the two ablations. Induction needs the monitor's "next submission must be a lock frame" history. |
+| `propB_shown` | `happyPathTest` is `Locked` with the lock frame shown; `darkLockPrefix` is `Locked` with the output off | Induction over phase, output state and panel content; a state predicate without history. |
 | `propS_sleep` | `sleepHandshakeTest` reaches both release and suspend | Bounded checking plus the two-nonce ablation. The valid acknowledgement may predate release. |
+| `propS_release`, `propS_committed`, `propS_ackedSleepCovered` | `ackedSleepCoveredTest` releases and suspends after an acknowledgement; `witAckedSuspend`, `witCommitted` | Sampling, the fixed traces of three ablations (15 to 20 steps, beyond the six-step symbolic bound). Induction needs: committed implies the hold or a pending report for an older token only, across instances. |
+| `propS_crashKeepsDelay` | `bridgeRestartCoveredSleepTest` crashes the bridge during a pending sleep | A one-step property of `bridgeCrash`; the six-step symbolic check covers its 3-step ablation depth. |
+| `propA_onePam` | `wrongSecretStaysLockedTest` checks one binding once; `challengeReplayGuardTest` refuses the replayed challenge | Induction over the per-instance check history and the order of accepted challenges. |
+| `propT_noDelivery` | `deliveryResumesAfterPromptTest` delivers before and after a prompt; `witSuppressed` | A one-step property of `compDispatch`; the six-step symbolic check covers its 6-step ablation depth. |
 | `propC_noLateDelivery` | `queuedDeliveryDroppedByLockTest` delivers and subsequently drops | Induction with effective-grant, issued-generation and revocation history. |
 | `propC_lockRevokes` | The same run locks with a live grant and a queued job | Induction with the holder map domain, lock phase and prompt state. |
 | `propC_consent` | `toGrant` consumes an Allow for the open prompt | Induction with provenance of positive answers. The stale-Allow scenario tests the monitor independently. |
 | `propC_stopExact` | `stopEndsStreamTest` consumes a Stop and `staleStopGuardTest` tries an older one | Induction over the accepted Stop's holder and generation. |
 | `propD_agent` | `agentOneShotTest` and post-v1 `agentCaptureGateTest` queue two effects | Induction with delivery history, consumption and generation freshness. |
 | `propD_v1` | The v1 gate rejects capture at init while transfer succeeds | Induction over prompt, table and queue. The property is constant true after v1, where the one-shot test exercises capture. |
-| `strongS_sleepCovered`, `strongS_ackedSleepCovered` | Timeout and acknowledged-sleep traces | Refute each on chosen. For the option, sample the acknowledged predicate and check the hold and restart paths. Universal coverage of sleep would also require a guarantee from logind. |
+| `strongS_sleepCovered` | `unackedSleepResidualTest`, `witUncoveredSuspend` | Refuted on chosen in two steps, by decision (finding 2). Universal coverage of sleep would require a guarantee from logind. `strongS_ackedSleepCovered` is implied by `propS_ackedSleepCovered`. |
 | `wit*`, `reach*` | Positive state predicates | Count sampled traces. One reaching trace establishes existence. The capture-grant state is intentionally unreachable in v1 and reached after v1. |
-| `lockAckProgressTest`, `unlockProgressTest` | Endpoints of sampled 40-step prefixes | Run the deterministic recovery schedule, at most 12 and 20 transitions respectively (32 for unlock with the hold). Fair-schedule liveness would need explicit delivery assumptions. |
+| `lockAckProgressTest`, `unlockProgressTest`, `worstCaseUnlockTest` | Endpoints of sampled 40-step prefixes, and one constructed worst state | Run the deterministic recovery schedule, at most 12 and 24 transitions respectively; exactly 19 from the worst state. Fair-schedule liveness would need explicit delivery assumptions, and an assumption that the bridge unit restarts. |
 
 For a Lean proof, instantiate the chosen design first. A universal theorem
 over an unrestricted `DEFECT` would include the rejected designs. Establish
@@ -611,65 +702,102 @@ is not removed automatically.
 
 The numbers refer to the runs recorded above.
 
-### 1. A sleep acknowledgement does not keep the session locked until the sleep
+### 1. A sleep acknowledgement must be a commitment (decided: the sleep hold)
 
-`strongS_ackedSleepCovered` fails on the chosen design. A short trace
-(`knownGapUnlockBetweenAckAndSuspendTest`, 17 steps to the suspend):
+Without the hold the design fails twice, and `ablate_sleep_hold` keeps both
+traces:
 
-1. logind announces sleep; the bridge asks the compositor to lock.
-2. The compositor locks and presents the lock frame. An unlock attempt is
-   opened, the right secret is typed, and the positive verdict is in flight.
-3. The compositor acknowledges the lock request; the bridge releases the
-   delay inhibitor.
-4. The verdict arrives. It is valid for the current epoch and attempt, so the
-   session unlocks and a session frame is presented.
-5. logind suspends. The panel shows the session.
+- `cx_no_sleep_hold_release` (16 steps). The verdict is in flight when the
+  compositor acknowledges. It arrives, the session unlocks and is presented,
+  and the bridge then consumes the correct acknowledgement and releases the
+  inhibitor with the session on the panel (`propS_release`).
+- `cx_no_sleep_hold_suspend` (17 steps). The bridge releases first, the
+  verdict arrives second, and logind suspends with the session on the panel
+  (`propS_ackedSleepCovered`).
 
-No invariant in `safety` is violated, and on resume the compositor relocks
-before it draws anything (`propB_resume`). What is exposed is the last
-session frame, from the resume until the first lock frame is presented. The
-window between step 3 and step 5 is short when no other delay inhibitor is
-held. Its duration depends on logind and the other inhibitor holders. The
-model measures transition order only.
+The rule, REQ-LOCK-026: in the step that sends the acknowledgement the
+compositor closes the open attempt and enters the hold. In the hold it opens
+no attempt and accepts no verdict. The acknowledgement carries a hold token,
+`{ inst, n }`, with `n` counted up at every acknowledgement. The hold ends on
+the clock jump of a resume, or on a report from the bridge that echoes the
+current token. The bridge sends the report only after it received the token,
+while logind's `PreparingForSleep` is false, and while it holds a delay
+inhibitor again. A new compositor instance starts in the hold with a token of
+its own, which it announces when it connects to the bridge.
 
-Candidate rule, modelled as `option_sleep_hold`: when the compositor
-acknowledges a lock request it closes the open attempt and neither opens an
-attempt nor accepts a verdict until the sleep is over. The hold ends on the
-clock jump of the resume, or when the bridge reports that logind is not
-preparing for sleep.
+Three versions of the rule were refuted before this one:
 
-The first version of this rule kept the hold in compositor memory only. The
-simulator refuted it after 20 237 traces: the compositor restarts between
-its acknowledgement and the suspend, the new instance knows of no sleep, and
-a valid unlock follows (`sleepHoldSurvivesRestart` is that trace). In the
-amended version a new instance starts in the hold and leaves it only when the
-bridge reports. That version passed the runs recorded above and both progress
-tests.
+- A hold kept in compositor memory only. The compositor restarts between its
+  acknowledgement and the suspend, the new instance knows of no sleep, and a
+  valid unlock follows (`cx_hold_memory_only`, 17 steps;
+  `ablate_hold_restart`).
+- A report without a token, which is how the first option modelled the end of
+  the hold: as a read of logind's state in the same step. A real report is a
+  message. One sent before a sleep was announced is still in flight when the
+  compositor acknowledges that sleep, and it ends the hold of a sleep that is
+  about to begin (`cx_hold_any_report`, 15 steps; `ablate_hold_token`).
+- A report sent before the bridge holds an inhibitor again. The hold ends,
+  the next sleep begins without delay, and nothing covers it. The guard
+  `sl.inhibit` in `bridgeReportAwake` is this rule
+  (`reportNeedsInhibitorGuardTest`).
 
-The costs are one more state in the lock reducer, one more bridge message, and a
-login or unlock that waits for the bridge after every compositor start. A
-bridge that never reports would keep the session locked, so the bridge gains
-the power to deny unlock, though still not to grant it. The
-rule is not part of the chosen design; it needs a decision.
+There is no timed exit from the hold. A timer cannot tell a slow suspend from
+a failed one, and the hold must fail closed. Without the bridge the hold ends
+at the next real resume.
 
-### 2. Sleep without a lock is reachable and the compositor cannot prevent it
+Costs. A password typed in the last moments before a suspend is discarded and
+typed again after the wake. After a failed sleep, and after a compositor
+start, unlock waits for one bridge round trip. A bridge that never reports
+keeps the session locked until the machine has slept and woken once: the
+bridge can deny an unlock, still not grant one. In fault-free steps: two
+after a compositor start, three after a failed sleep, none after a resume.
+
+### 2. Sleep without an acknowledgement is reachable and stays a stated limit
 
 `strongS_sleepCovered` fails in two steps: logind announces sleep and the
-inhibitor delay runs out. The same happens when the bridge dies, because its
-inhibitor fd closes with it. The design answers with REQ-LOCK-015:
-the compositor submits no session frame after the resume. The last session
-frame stays on the panel until the first lock frame replaces it.
+inhibitor delay runs out (`unackedSleepResidualTest`). No rule of the
+compositor or the bridge changes that, because the timer belongs to logind.
+The property therefore stays outside `safety`, and the design guarantees the
+narrower statements that are in it:
 
-Two consequences for the implementation:
+- a sleep released by an acknowledgement, or one that follows an
+  acknowledgement of its cycle, begins covered (`propS_ackedSleepCovered`);
+- at the release the session is locked and covered (`propS_release`);
+- after any sleep the first submitted frame is a lock frame and no attempt
+  opens before it is presented (`propB_firstSubmit`, `propB_shown`);
+- a sleep without acknowledgement can leave on the panel only a frame
+  submitted before it: the one shown at the suspend or the one pending then
+  (REQ-LOCK-012).
 
-- The time from `PrepareForSleep` to the presented lock frame has a budget of
-  `InhibitDelayMaxSec`. REQ-LOCK-014 keeps the start of `lock/ui`
-  out of that budget.
-- The bridge is a single point of failure for covered sleep. If the bridge
-  passed the inhibitor fd to the compositor, a bridge crash would no longer
-  release it, and the compositor would release it by closing the fd when it
-  is `Locked`. That would also remove the acknowledgement message and its
-  nonce (finding 5). Not modelled; it needs a decision.
+Three decisions narrow the ways to reach the limit:
+
+- **A bridge crash no longer releases the delay** (REQ-LOCK-027, decided
+  O-30). The inhibitor descriptor is also kept in the service manager's
+  descriptor store. `ablate_fd_store` shows the old behaviour in 3 steps;
+  `bridgeRestartCoveredSleepTest` shows the crash during a pending sleep
+  ending in a covered sleep. The alternative, handing the descriptor to the
+  compositor, was not taken: it makes every compositor crash release the
+  delay, adds a message that carries a descriptor, and removes the nonce
+  only by moving logind's cycle problem into the compositor.
+- **A lock that cannot be presented ends in a dark panel** (REQ-LOCK-011,
+  decided O-4). After a bounded number of failed lock frames the compositor
+  switches the output off and acknowledges by the second cause
+  (`compBlankOutput`, `lockDespiteFlipFailureTest`). It needs no deadline
+  from logind: the whole lock budget is below the smallest delay the
+  preflight accepts.
+- **The bridge takes a new inhibitor before it reports** (finding 1), so the
+  window without an inhibitor after a resume is the bridge's reaction time
+  and is not extended by the hold.
+
+What is left: logind's own timer (the compositor hangs for longer than the
+delay), a bridge unit that the service manager gave up
+(`bridgeUnitLostResidualTest`), and a second sleep requested before the
+bridge took a new inhibitor after a resume. In all three the session was
+unlocked and visible to its user before the sleep; a locked session sleeps
+covered.
+
+A block inhibitor would remove the limit and was rejected: a compositor that
+hangs would then keep the laptop awake in a bag, and the cost is unbounded.
 
 ### 3. The instance id is the only thing that tells verdicts apart after a restart
 
@@ -741,42 +869,126 @@ with a variant that breaks it (`propA_broker`, `propC_stopExact`, the
 presentation half of `propB_resume`). New requirements should arrive with
 their invariant, not only with a rule in an action.
 
-### 11. Two catalog acceptance criteria exceed the chosen predicates
+### 11. A lock that is not on the panel now must not take a password (decided)
 
-`quint test variants.qnt --main=chosen --match=catalogGap` exercises both
-gaps deterministically. The final states satisfy all 15 predicates.
+The first validation found that REQ-LOCK-015 says more than `propB_resume`
+checks: a compositor that stayed `Locked` across a sleep could open an
+attempt and unlock before it submitted anything, and its first frame after
+the resume was then a session frame (`cx_keep_locked_on_resume`, 15 steps;
+`ablate_fresh_lock`). The same gap existed in REQ-LOCK-010: with the output
+off the lock is acknowledged without a frame, the session could unlock
+unseen, and the first frame on the returning output was a session frame
+(`cx_blind_attempt`, 12 steps; `ablate_shown_lock`).
 
-- **REQ-LOCK-018.** The bridge can receive a valid acknowledgement after an
-  authorized unlock and presentation. The panel is already uncovered at
-  release, earlier than the known gap between release and suspend.
-  `propS_sleep` records where the acknowledgement came from. O-29 would hold
-  the lock starting at acknowledgement.
-- **REQ-LOCK-015.** If the compositor was already locked across suspend, it
-  can open a fresh attempt and unlock after resume before submitting any
-  frame. Its first submission can then be a session frame. `propB_resume`
-  covers the interval ending at authorized unlock. Decide whether to require a
-  fresh presentation before enabling attempts or qualify the catalog wording.
+The rule: `Locked` means that a lock frame of the current wake period is on
+the enabled output, or that the output is off. A resume and a returning
+output demote `Locked` to `Locking`. An attempt opens, and a verdict is
+accepted, only while `Locked` on an enabled output (`lockShown`).
+`propB_firstSubmit` and `propB_shown` check it.
 
-### 12. Which boundary an ordering test observes
+The cost is one frame: after a resume the prompt takes input once the first
+lock frame is presented. The compositor had to draw that frame anyway.
 
-- Opening a consent prompt leaves an existing portal grant effective. A
-  delivery can occur with the prompt open. The model has no scene or pixels.
-  REQ-TRUST-006 and REQ-TRUST-007 need separate tests for suppression of
-  capture during trusted input and exclusion of trusted surfaces.
-- The holder's generation changes at reconnect. A record can still have
-  `live = true` and an old connection until cleanup. Dispatch drops the job.
-  This checks the delivery criterion of REQ-GRANT-014. Resource teardown or
-  what an indicator displays needs a separate observation.
-- `auth.used` belongs to the selected challenge. Replaying an old challenge
-  followed by the current one resets it, so both good and bad credentials for
-  one binding can enter the check history. The compositor still consumes an
-  open attempt once. A claim of one PAM invocation per binding would require
-  a transport or deduplication rule.
-- `uiCrash` and `compCloseAttempt` are distinct. A current positive verdict
-  can arrive after the former and before the latter. Specify the ordering of
-  UI-exit notification and verdict processing in the reducer tests. There is
-  no consent-UI crash event or bounded restart backoff in this model.
+The REQ-LOCK-018 half of the old finding is finding 1.
 
+### 12. Smaller decisions
+
+- **Trusted mode (REQ-TRUST-006).** A live grant kept delivering while a
+  consent prompt was open (`cx_deliver_during_prompt`, 6 steps;
+  `ablate_trusted_mode`). Now nothing is enqueued while a prompt is open, the
+  adapter drops what was enqueued before, and the grant itself stays live
+  (`propT_noDelivery`, `deliveryResumesAfterPromptTest`). The lock and
+  credential prompts were covered already, because a lock revokes every grant
+  (`propC_lockRevokes`). The model has no scene: stacking, pixels and input
+  routing stay with the compositor tests of REQ-TRUST-001, REQ-TRUST-006 and
+  REQ-TRUST-007. A prompt that is never answered would pause a stream for
+  good, so the prompt is closed as denied after a bounded time
+  (`compAskClose`, `answerAfterPromptClosedGuardTest`).
+- **One check per binding (REQ-AUTH-019).** Replaying an old challenge and
+  then the current one reset `auth.used`, so a wrong and a right secret could
+  both be checked for one binding (`cx_challenge_replay`, 13 steps;
+  `ablate_challenge_order`). `authd` now accepts a challenge only if it is
+  later than the last one it accepted (`bindLt`, `propA_onePam`). An `authd`
+  restart starts a new count, and the compositor closes the open attempt when
+  it sees the disconnect, so the next challenge has a later attempt number.
+- **Which event consumes an attempt (REQ-AUTH-004).** The first one the
+  compositor handles. A valid verdict handled before the exit notification of
+  its UI unlocks (`verdictBeatsUiExitTest`); handled after it, the verdict is
+  rejected (`uiExitBeatsVerdictGuardTest`). The verdict is `authd`'s
+  statement that the right secret was typed into that attempt's channel, and
+  it needs no living UI. Refusing it would not add security and would make
+  the outcome depend on which socket is read first.
+- **Stale grant record (REQ-GRANT-014).** The compositor now removes the
+  record when it handles the end of the connection (`compSeeDisconnect`,
+  `disconnectCleanupTest`), and every reader uses the predicate `grantLive`
+  that the adapter uses, so that between the reconnect and its handling no
+  delivery is enqueued and the indicator shows no grant
+  (`staleRecordNotEnqueuedGuardTest`).
+- **`DEFECT` is a sum type.** `DEFECT = SkipInstanceChek` does not typecheck.
+  As a string it selected the chosen design, and a counterexample test in
+  that module would have been the only sign.
+- **Bounded nonces.** See [Scope](#scope): the scheduler mints at most four
+  lock requests.
+
+### 13. The consent prompt had no way to close without an answer
+
+Found while modelling trusted mode. In the first model a prompt ended only by
+an answer, a lock or a replaced window. With REQ-TRUST-006 enforced, a
+prompt that nobody answers pauses every stream indefinitely, and a client
+that can ask for consent can cause it. `compAskClose` and the bound in
+REQ-TRUST-012 (the timeout half of O-28, decided) close that.
+
+### 14. `quint verify` can pass without checking anything
+
+With all 31 instances in one file, `quint verify variants.qnt --main=chosen
+--invariant=safety --max-steps=6` exited with status 0 after 43 s and printed
+neither a verdict nor an error. `quint compile --target=tlaplus` on the same
+file fails with `RangeError: Invalid string length`: the flattened model does
+not fit in one JavaScript string. With the three instances that must hold in
+`variants.qnt` and the 28 variants in `ablations.qnt` the same command prints
+`[ok] No violation found`. A check script must look for that line and not
+only at the exit status.
+
+### 15. What the model assumes about the kernel at suspend
+
+`atSuspend` settles a pending flip once: shown before the sleep or dropped,
+and a later suspend does not change the outcome
+(`settledFlipAcrossTwoSleepsTest`). The first model re-drew the outcome at
+every suspend, which let a frame dropped at the first sleep appear at the
+second.
+
+The assumption is kept. Under atomic KMS the driver saves the committed
+state at suspend and commits it again at resume; a commit that did not
+complete is either part of that state or it is not, and nothing but a new
+commit from the compositor changes the state afterwards. Both target drivers
+are atomic.
+
+No invariant depends on it. `env_resettle_flip` restores the weaker
+behaviour, and `safety` holds there: the second suspend comes after the
+compositor ran, and the compositor replaced or re-covered the frame by then
+(`envResettleLockFrameTest`, `envResettleSessionFrameTest`).
+
+What the model cannot show is the panel itself. With panel self-refresh the
+panel shows its own copy of an earlier frame while the link is down. The
+hardware test, per laptop, with self-refresh on, for s2idle and for S3 where
+the firmware has it:
+
+1. Submit frame A (one colour) and wait for its flip. Submit frame B
+   (another colour) with a nonblocking commit and suspend at once.
+2. At the wake, before the compositor commits anything, read the CRC of the
+   scanout (`crtc-N/crc/data` in debugfs) and photograph the panel. Record
+   whether it is A or B, and that the flip event for B arrives after the wake
+   or never. B is expected, because the commit was accepted and is part of
+   the saved state; the model allows both. Enabling the CRC source can switch
+   self-refresh off, so the photograph taken without CRC capture is the run
+   that covers self-refresh.
+3. Suspend again without a commit. At the second wake the CRC and the photo
+   must equal those of step 2.
+4. Repeat 100 times with the delay between commit and suspend varied from 0
+   to 2 frames.
+
+A different frame in step 3 falsifies the assumption. Then
+`env_resettle_flip` is the model of record; the rules stay the same.
 
 ## From model actions to reducer events
 
@@ -792,37 +1004,44 @@ a model trace can be replayed as a reducer test.
 | `kmsFlipDone` | compositor lock | `FlipCompleted { content }` | `LockAcknowledged { epoch }` when it carried the lock frame |
 | `kmsFlipFail` | compositor lock | `FlipFailed` | `ScheduleFrame` |
 | `compReadStaleFlip` | compositor lock | `FlipCompleted` for a frame submitted before the last clock jump | `ScheduleFrame`; no acknowledgement |
-| `outputOff`, `outputBack` | compositor lock | `OutputDisabled`, `OutputEnabled` | `ScheduleFrame` on enable |
+| `outputOff`, `outputBack` | compositor lock | `OutputDisabled`, `OutputEnabled` | on enable: `Locked` becomes `Locking`, `KillLockUi`, `ScheduleFrame` |
+| `compBlankOutput` | compositor lock | `FrameFailed` or `FlipFailed` when the retry bound is reached while `Locking` | `DisableOutput`; the acknowledgement follows from `OutputDisabled` |
 | `compAckNoOutput` | compositor lock | `LockRequested` or `OutputDisabled` while `Locking` with no output | `LockAcknowledged { epoch }` |
-| `compOpenAttempt` | compositor lock | `PromptRequested` | `SpawnLockUi { bind }`, `SendChallenge { bind }` |
+| `compOpenAttempt` | compositor lock | `PromptRequested`, accepted only while `Locked` on an enabled output and outside the hold | `SpawnLockUi { bind }`, `SendChallenge { bind }` |
 | `compCloseAttempt` | compositor lock | `AttemptTimedOut`, `LockUiExited` | `KillLockUi` |
-| `compRecvVerdict` | compositor lock | `VerdictReceived { bind, ok }` | `Unlock` or `KillLockUi`; a verdict that does not match is dropped |
+| `compRecvVerdict` | compositor lock | `VerdictReceived { bind, ok }` | `Unlock` or `KillLockUi`; a verdict that does not match, or that arrives in the hold or with the output off, is dropped |
 | `uiUnlockAndDestroy` | none | no such message in `protocol/` | none |
 | `logindUnlockSignal` | bridge | `LogindUnlock` | none |
-| `compSeeJump` | every compositor reducer | prelude of every event: `boottime - monotonic` grew | `RevokeAllGrants`, `KillLockUi`, `ScheduleFrame` |
-| `compRestart` | compositor lock | initial state is `Locking` with a new random instance id | `ScheduleFrame` |
+| `compSeeJump` | every compositor reducer | prelude of every event: `boottime - monotonic` grew | phase becomes `Locking`, the hold ends, `RevokeAllGrants`, `KillLockUi`, `ScheduleFrame` |
+| `compRestart` | compositor lock | initial state is `Locking`, in the hold, with a new random instance id | `ScheduleFrame`, `SendHoldToken { token }` when the bridge connects |
 | `userType` | `lock/ui` | key input | credential frame on the attempt's channel |
 | `uiCrash` | compositor lock | `LockUiExited` | cover drawn by the compositor |
-| `authdRecvChallenge` | `authd` | `ChallengeReceived { bind, channel }` | none |
+| `authdRecvChallenge` | `authd` | `ChallengeReceived { bind, channel }`, accepted only if later than the last accepted one | none |
 | `authdRecvCred` | `authd` | `CredentialReceived { channel }` | `StartPwcheck { bind }` |
 | `pwcheckRun` | `pwcheck` | request frame | exit status |
 | `authdRecvPam` | `authd` | `PwcheckFinished { bind, ok }` | `SendVerdict { bind, ok }` |
 | `authdRestart` | `authd`; compositor lock | `authd`: initial state has no challenge. Compositor: `AuthdDisconnected` | `KillLockUi`; the open attempt is consumed |
 | `logindPrepareSleep`, `bridgeSeeSleep` | bridge | `PrepareForSleep(true)` | `SendLockRequest { nonce }` |
-| `compAckLockReq` | compositor lock | `LockRequestReceived { nonce }`, answered on entering or while `Locked` | `SendLockAck { nonce }` |
+| `logindSleepFailed` | bridge | `PrepareForSleep(false)` without a clock jump | `TakeInhibitor`, then `SendSleepOver` for the token it holds |
+| `compAckLockReq` | compositor lock | `LockRequestReceived { nonce }`, answered on entering or while `Locked` | `SendLockAck { nonce, token }`, `KillLockUi`; the hold begins in the same transition |
 | `bridgeRecvAck` | bridge | `LockAckReceived { nonce }` | `ReleaseInhibitor` when the nonce is the current one |
-| `compHoldRelease` (option) | compositor lock | `SleepOver` from the bridge | none |
+| `bridgeRearm` | bridge | `PrepareForSleep(false)`, or start without an inhibitor in the descriptor store | `TakeInhibitor`, `StoreDescriptor` |
+| `bridgeReportAwake(t)` | bridge | `HoldTokenReceived { token }` or `PrepareForSleep(false)`, once `PreparingForSleep` reads false and the inhibitor is held | `SendSleepOver { token }` |
+| `compHoldRelease(t)` | compositor lock | `SleepOver { token }` | the hold ends when the token is the current one; otherwise dropped |
 | `logindSuspend(drain)`, `inhibitTimeout(drain)`, `resume` | simulator | faults of the environment; `drain` says whether a pending flip was shown or dropped | none |
-| `bridgeCrash`, `bridgeStart` | bridge | process exit; initial state takes an inhibitor | none |
-| `compAsk` | compositor grants | `ConsentRequested { holder, window, connection }`; refused for agent capture in v1 | `SpawnConsentUi { ask }` |
+| `bridgeCrash`, `bridgeStart` | bridge | process exit; the initial state adopts the inhibitor from the descriptor store or takes one | `SendLockRequest { nonce }` when `PreparingForSleep` reads true |
+| `bridgeFdLost` | simulator | the service manager gave the bridge unit up | none |
+| `compAsk` | compositor grants | `ConsentRequested { holder, window, connection }`; refused for agent capture in v1 | `SpawnConsentUi { ask }`, `EnterTrustedMode` |
+| `compAskClose` | compositor grants | `ConsentTimedOut`, `ConsentUiExited` | `KillConsentUi`, `LeaveTrustedMode`; the request is denied |
 | `consentAnswer` | consent UI | the user's choice | answer frame |
 | `compRecvAnswer` | compositor grants | `ConsentAnswered { ask, allow }` | `GrantCreated { holder, generation }` |
 | `userPressStop`, `compRecvStop` | compositor grants | `StopPressed { holder, generation }` | `CloseStream` when the generation is the live one, else dropped |
 | `windowReplaced` | compositor grants | `WindowGone { window, generation }` | `CloseStream`, `KillConsentUi` |
 | `deadlinePasses`, `compExpire` | compositor grants | time in the event; `GrantTimerFired` | `CloseStream` |
-| `holderRestart` | compositor grants | `ClientDisconnected { connection }` | none |
-| `compEnqueue` | compositor grants | a frame or transfer is ready | `Deliver { holder, generation, seq }` |
-| `compDispatch` | adapter | executes `Deliver` | checks `grant_live(holder, generation, now)` first, drops otherwise |
+| `holderRestart` | simulator | the holder's connection closes and a new one opens | none |
+| `compSeeDisconnect` | compositor grants | `ClientDisconnected { connection }` | `CloseStream`; the grant record is removed |
+| `compEnqueue` | compositor grants | a frame or transfer is ready; nothing is emitted unless `grant_live` holds and no prompt is open | `Deliver { holder, generation, seq }` |
+| `compDispatch` | adapter | executes `Deliver` | checks `grant_live(holder, generation, now)` and trusted mode first, drops otherwise |
 
 Replaying a trace:
 
@@ -837,7 +1056,7 @@ Replaying a trace:
 4. Name the test after the requirement, for example
    `req_auth_001_stale_instance`.
 
-The 24 `cx_` runs and the 32 chosen tests are the first set to port. A reader for
+The 34 `cx_` runs and the 61 chosen tests are the first set to port. A reader for
 ITF traces would be a new dependency and needs the usual justification; the
 `cx_` runs can be ported by hand without it.
 
@@ -851,30 +1070,36 @@ named in a comment next to the action, invariant or test that covers it.
 | REQ-LOCK-002 | `kmsFlipDone`, `propB_covered`, `propB_phase`, `staleFlipDoesNotAckTest` |
 | REQ-LOCK-007 | `lockNow`, `compLock`, `staleEpochVerdictGuardTest` |
 | REQ-LOCK-008 | `uiUnlockAndDestroy`, `uiCannotUnlockGuardTest` |
-| REQ-LOCK-010 | `compAckNoOutput` |
-| REQ-LOCK-011 | `compRender(false)`, `kmsFlipFail`, `renderErrorStaysLockingGuardTest` |
-| REQ-LOCK-013 | `compRestart` (the model starts the new instance covered; the catalog ends the session) |
+| REQ-LOCK-010 | `compAckNoOutput`, `outputBack`, `lockShown`, `propB_firstSubmit`, `propB_shown`, `noBlindAttemptGuardTest`, `noBlindVerdictGuardTest`, `outputReturnsLockFirstTest` |
+| REQ-LOCK-011 | `compRender(false)`, `kmsFlipFail`, `compBlankOutput`, `renderErrorStaysLockingGuardTest`, `lockDespiteFlipFailureTest` |
+| REQ-LOCK-012 | `inhibitTimeout`, `bridgeFdLost`, `strongS_sleepCovered` (outside `safety`), `unackedSleepResidualTest`, `bridgeUnitLostResidualTest` |
+| REQ-LOCK-013 | `compRestart`, `freshComp`, `propB_firstSubmit`, `sleepHoldSurvivesRestartGuardTest` (the model starts the new instance covered, locked and in the hold; the catalog ends the session and a greeter authenticates, which the model folds into the lock of the new instance) |
 | REQ-LOCK-014 | `compRender`: the lock frame does not depend on `lock/ui` |
-| REQ-LOCK-015, REQ-LOCK-016 | `compSeeJump`, `compReadStaleFlip`, `propB_resume`, `resumeRelocksTest`, `staleFlipAfterResumeGuardTest`, `firstPresentationAfterResumeTest`, `firstPresentationAfterResume2Test` |
+| REQ-LOCK-015, REQ-LOCK-016 | `compSeeJump`, `compReadStaleFlip`, `lockShown`, `propB_resume`, `propB_firstSubmit`, `propB_shown`, `resumeRelocksTest`, `staleFlipAfterResumeGuardTest`, `firstPresentationAfterResumeTest`, `firstPresentationAfterResume2Test`, `freshLockBeforeAttemptGuardTest`, `unlockAfterResumeTest`, `settledFlipAcrossTwoSleepsTest` |
 | REQ-LOCK-017 | `logindUnlockSignal`, `logindUnlockIgnoredGuardTest` |
-| REQ-LOCK-018 | `bridgeRecvAck`, `propS_sleep`, `sleepHandshakeTest` |
+| REQ-LOCK-018 | `bridgeRecvAck`, `propS_sleep`, `propS_release`, `propS_ackedSleepCovered`, `sleepHandshakeTest`, `ackedSleepCoveredTest` |
 | REQ-LOCK-021 | `lockNow`, `compDispatch`, `propC_lockRevokes`, `queuedDeliveryDroppedByLockTest` |
 | REQ-LOCK-024 | `compAckLockReq`, `bridgeRecvAck`, `staleLockAckGuardTest` |
 | REQ-LOCK-025 | `clockOk`, `noFrameBeforeJumpGuardTest` |
+| REQ-LOCK-026 | `compAckLockReq`, `bridgeReportAwake`, `compHoldRelease`, `compSeeJump`, `freshComp`, `propS_committed`, `propS_ackedSleepCovered`, `propB_shown`, `ackCommitsGuardTest`, `noAttemptInHoldGuardTest`, `sleepHoldClosesGapGuardTest`, `sleepHoldSurvivesRestartGuardTest`, `staleSleepOverGuardTest`, `reportNeedsInhibitorGuardTest`, `holdEndsOnResumeTest`, `holdEndsAfterFailedSleepTest` |
+| REQ-LOCK-027 | `bridgeCrash`, `bridgeStart`, `bridgeRearm`, `bridgeFdLost`, `propS_crashKeepsDelay`, `bridgeCrashKeepsDelayGuardTest`, `bridgeRestartCoveredSleepTest` |
 | REQ-AUTH-001 | `compRecvVerdict`, `propA_verdict`, `happyPathTest`, `wrongSecretStaysLockedTest`, `staleInstanceVerdictGuardTest`, `staleEpochVerdictGuardTest` |
 | REQ-AUTH-003 | `authdRecvPam`, `propA_pam` |
-| REQ-AUTH-004 | `compCloseAttempt`, `lateVerdictAfterTimeoutGuardTest`, `propA_broker` |
+| REQ-AUTH-004 | `compCloseAttempt`, `lateVerdictAfterTimeoutGuardTest`, `propA_broker`, `verdictBeatsUiExitTest`, `uiExitBeatsVerdictGuardTest` |
 | REQ-AUTH-015 | `compRestart`, `staleInstanceVerdictGuardTest` |
 | REQ-AUTH-016 | `compSeeJump`, `propA_wake`, `verdictAcrossSleepGuardTest` |
 | REQ-AUTH-017 | `authdRestart`, `propA_broker`, `verdictAfterBrokerDisconnectGuardTest` |
 | REQ-AUTH-018 | `authdRecvCred`, `propA_typed`, `staleCredentialGuardTest` |
+| REQ-AUTH-019 | `authdRecvChallenge`, `bindLt`, `propA_onePam`, `challengeReplayGuardTest` |
 | REQ-TRUST-002 | `compOpenAttempt` |
+| REQ-TRUST-006 | `trustedMode`, `compEnqueue`, `compDispatch`, `propT_noDelivery`, `promptSuppressesDeliveryGuardTest`, `noEnqueueDuringPromptGuardTest`, `deliveryResumesAfterPromptTest` (delivery order only) |
+| REQ-TRUST-012 | `compAskClose`, `answerAfterPromptClosedGuardTest` |
 | REQ-GRANT-005 | `revokeAll` |
 | REQ-GRANT-006 | `compSeeJump`, `compRestart`, `compExpire`, `holderRestart` |
 | REQ-GRANT-007 | `windowReplaced`, `replacedWindowDropsDeliveryGuardTest`, `consentForReplacedWindowGuardTest` |
 | REQ-GRANT-008 | `compRecvStop`, `propC_stopExact`, `staleStopGuardTest`, `stopEndsStreamTest` |
-| REQ-GRANT-013 | `compDispatch`, `propC_noLateDelivery`, `expiredDeliveryDroppedGuardTest`, `queuedDeliveryDroppedByLockTest` |
-| REQ-GRANT-014 | `compDispatch`, `reconnectDropsDeliveryGuardTest` |
+| REQ-GRANT-013 | `compDispatch`, `grantLive`, `propC_noLateDelivery`, `expiredDeliveryDroppedGuardTest`, `queuedDeliveryDroppedByLockTest` |
+| REQ-GRANT-014 | `compDispatch`, `compSeeDisconnect`, `grantLive`, `reconnectDropsDeliveryGuardTest`, `disconnectCleanupTest`, `staleRecordNotEnqueuedGuardTest` |
 | REQ-GRANT-015 | `compRecvAnswer`, `propC_consent` |
 | REQ-AGENT-001 | `compAsk`, `compDispatch`, `propD_agent`, `propD_v1`, `agentCaptureGateTest` |
 | REQ-AGENT-005 | `compDispatch`, `agentOneShotTest` |
@@ -885,8 +1110,7 @@ Proposed, with no catalog id yet. They carry no `REQ-` prefix in the model:
 | Name | Statement | State |
 | --- | --- | --- |
 | `lockAckProgress` | Without further faults a lock request is acknowledged in a bounded number of steps. | proposed; checked by `lockAckProgressTest` |
-| `unlockProgress` | Without further faults the right secret unlocks in a bounded number of steps. | proposed; checked by `unlockProgressTest` |
-| `sleepHold` | After acknowledging a lock request for a sleep the compositor accepts no verdict until the sleep is over, and a new instance starts in that hold. | proposed; candidate rule of finding 1, modelled as `option_sleep_hold` |
+| `unlockProgress` | Without further faults the right secret unlocks in a bounded number of steps. | proposed; checked by `unlockProgressTest` and `worstCaseUnlockTest` |
 
 ## Limits
 
@@ -896,11 +1120,22 @@ Proposed, with no catalog id yet. They carry no `REQ-` prefix in the model:
   proof under fairness. A message in the model stays deliverable forever, so
   the progress tests assume that a sender repeats its pending request when
   the peer reconnects: the compositor its challenge to a restarted `authd`,
-  the bridge its lock request to a restarted compositor.
+  the bridge its lock request to a restarted compositor, and the compositor
+  its hold token to a restarted bridge (REQ-LOCK-026).
 - The stale-flip rule rests on an assumption about the kernel (see
-  [Scope](#scope)). If a driver can complete a flip from before the sleep
-  after the resume, REQ-LOCK-015 needs a test on that hardware with a frame
-  checksum, and the compositor cannot fix it alone.
+  [Scope](#scope) and finding 15). If a driver can put a frame from before
+  the sleep on the panel after the compositor ran again, REQ-LOCK-015 needs
+  the hardware test of finding 15, and the compositor cannot fix it alone.
+- REQ-LOCK-026 and REQ-LOCK-027 rest on three behaviours of systemd that the
+  model takes as given and that a VM test has to confirm: the descriptor
+  store of a user unit keeps a logind delay lock alive across a crash of the
+  unit's process; logind sends `PrepareForSleep(false)` after a sleep that
+  failed; and a delay lock taken while a sleep is pending does not delay that
+  sleep (so the bridge takes its lock before it reports, never during a
+  pending sleep).
+- The hold has no timed exit. A bridge that never reports keeps the session
+  locked until a real suspend and wake. The progress tests assume a bridge
+  that restarts.
 - After a compositor crash the model sets the panel to blank. That holds when
   the kernel restores the console once the DRM master is gone and the greeter
   takes over. It was not checked on the target machines.
