@@ -1,0 +1,79 @@
+# Dependency policy for all three workspaces (top level, compositor/, fuzz/).
+# `just deny` runs it on each lockfile.
+
+[graph]
+# The only target that ships. Crates that other platforms would pull in are
+# not judged.
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+# A known vulnerability or a yanked version blocks the merge. cargo-deny has
+# no "deny" switch for vulnerabilities because that is always on.
+yanked = "deny"
+# Unsound and unmaintained crates are looked for in the whole graph. Unsound
+# blocks. Unmaintained is turned into a warning on the command line
+# (`--warn unmaintained` in the justfile), because cargo-deny can only scope
+# it here, and a warning is the agreed answer: it calls for a replacement
+# plan, not for a stop.
+unsound = "all"
+unmaintained = "all"
+# An entry needs the advisory id and the reason it does not apply.
+ignore = []
+
+[licenses]
+# Licenses that can be combined into a GPL-3.0-or-later program.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+  "ISC",
+  "LGPL-2.1-or-later",
+  "LGPL-3.0-or-later",
+  "MIT",
+  "MPL-2.0",
+  "NCSA",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.93
+# One list serves three lockfiles, so each of them leaves some entries unused.
+unused-allowed-license = "allow"
+
+[bans]
+# Duplicates are listed so that they stay visible; large trees (Slint,
+# Smithay) cannot avoid all of them.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between our own crates carry no version.
+allow-wildcard-paths = true
+deny = [
+  { crate = "tokio", reason = "No process runs an async runtime; zbus uses async-io in the shell only." },
+  { crate = "openssl", reason = "Nothing here speaks TLS; no C crypto library in any process." },
+  { crate = "openssl-sys", reason = "See openssl." },
+  { crate = "chrono", wrappers = [
+    "i-slint-core",
+  ], reason = "Unmaintained. Tolerated only as a dependency Slint forces on the shell." },
+  { crate = "nix", reason = "rustix covers the system calls we need with less unsafe code." },
+  { crate = "image", reason = "Decodes many formats we never show; use png." },
+  { crate = "resvg", reason = "Icons are prepared as PNG or Slint paths ahead of time." },
+  { crate = "lodepng", reason = "Use png." },
+  { crate = "basic-toml", reason = "Use toml, in the shell and compositor only." },
+  { crate = "bincode", reason = "Processes talk through skorupa-protocol frames." },
+  { crate = "dbus", reason = "Wraps the C libdbus; the shell uses zbus." },
+  { crate = "libseccomp", reason = "Wraps a C library; the sandbox builds its filters in Rust." },
+  { crate = "tracing-subscriber", reason = "Logging goes to journald with structured fields, without this tree." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Smithay has no usable crates.io release; the compositor pins a git revision.
+allow-git = ["https://github.com/Smithay/smithay"]

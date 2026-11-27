@@ -1,2 +1,10 @@
 /AGENTS.local.md
 /CLAUDE.local.md
+/target/
+/compositor/target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/coverage/
+/result
+/result-*

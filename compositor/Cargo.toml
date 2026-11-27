@@ -1,0 +1,40 @@
+# Separate workspace: Smithay and its dependency tree stay out of the lockfile
+# that the lock, shell and sandbox processes build from.
+#
+# The lint tables repeat the ones in the top-level Cargo.toml, because Cargo
+# cannot share them between workspaces. Change them together.
+[workspace]
+resolver = "3"
+
+[package]
+name = "skorupa-compositor"
+description = "Wayland compositor for one screen."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/scrappyworks/skorupa"
+publish = false
+
+[dependencies]
+# Smithay is not a dependency yet. It arrives pinned to a git revision
+# together with the first backend code; deny.toml already allows its source.
+skorupa-protocol = { path = "../protocol" }
+
+[lints.rust]
+# `forbid` until the audited module that calls Smithay's unsafe GPU
+# constructor exists. That change lowers this to `deny` and allows the lint in
+# that one module only.
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+expect_used = "warn"
+panic = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+overflow-checks = true

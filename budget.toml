@@ -1,0 +1,20 @@
+# Size budget in lines of Rust code, tests included (tokei, "code" column).
+# `just budget` fails when a component or the total is above its cap, or when
+# Rust code lies outside every component.
+#
+# The budget is an acceptance criterion. Going over calls for a decision by
+# the owner (cut something, or move lines between components here), not for a
+# quiet raise.
+
+# Hard cap. The component caps add up to 96 000 and leave 4 000 spare.
+total = 100_000
+
+[components]
+compositor = { cap = 35_000, paths = ["compositor"] }
+shell = { cap = 24_000, paths = ["shell"] }
+lock = { cap = 17_000, paths = ["lock"] }
+sandbox = { cap = 7_000, paths = ["sandbox"] }
+protocol = { cap = 2_000, paths = ["protocol"] }
+sim-fuzz = { cap = 6_000, paths = ["sim", "fuzz"] }
+# Both directories arrive with the Screenshot adapter and the `skorupa` CLI.
+portal-cli = { cap = 5_000, paths = ["portal", "cli"] }

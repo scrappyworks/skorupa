@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# main changes only through `just merge`, after a green `just check`.
+# `just hooks` turns this hook on. git feeds one line per pushed ref:
+# <local ref> <local sha> <remote ref> <remote sha>.
+while read -r _ _ remote_ref _; do
+    if [ "$remote_ref" = refs/heads/main ]; then
+        echo "main takes changes only through a pull request: push your branch and run 'just merge'." >&2
+        exit 1
+    fi
+done

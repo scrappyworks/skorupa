@@ -1,0 +1,7 @@
+# One pinned stable compiler for local work, the merge gate and the flake
+# (rust-overlay reads this file). Bump it in its own change. The nightly used
+# for fuzzing and Miri is pinned separately in flake.nix.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

@@ -1,0 +1,5 @@
+# Tests may unwrap and panic: a panic is how a test fails.
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
