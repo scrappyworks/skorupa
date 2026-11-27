@@ -112,18 +112,15 @@
       lintAndTest =
         args:
         let
-          checkArgs = args // {
-            # Debug builds: the gate checks behaviour, not speed.
-            CARGO_PROFILE = "dev";
-          };
+          # No --release: the gate checks behaviour, not speed.
           testTargets = "cargo test --locked --workspace --all-targets";
         in
         craneLib.mkCargoDerivation (
-          checkArgs
+          args
           // {
             pnameSuffix = "-lint-test";
             cargoArtifacts = craneLib.buildDepsOnly (
-              checkArgs
+              args
               // {
                 buildPhaseCargoCommand = "${testTargets} --no-run";
                 doCheck = false;
