@@ -1,0 +1,48 @@
+# Main workspace: everything except the compositor and the fuzz targets.
+#
+# `compositor/` is its own workspace because Smithay brings a heavy dependency
+# tree that the other processes must not share a lockfile with. `fuzz/` is its
+# own workspace because cargo-fuzz needs a nightly compiler.
+#
+# Cargo cannot share lint tables between workspaces, so `compositor/Cargo.toml`
+# and `fuzz/Cargo.toml` repeat the tables below. Change them together.
+[workspace]
+resolver = "3"
+members = ["protocol", "shell", "lock", "sandbox", "sim"]
+exclude = ["compositor", "fuzz"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/scrappyworks/skorupa"
+publish = false
+
+[workspace.dependencies]
+# Test-only. Default features add process forking and a regex parser we do not use.
+proptest = { version = "1.9", default-features = false, features = ["std"] }
+
+[workspace.lints.rust]
+# No exceptions in this workspace. The one audited GPU constructor call lives
+# in the compositor workspace.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Pedantic as a whole: a lint is switched off here, with a reason, when it
+# proves wrong for this code base, instead of being silenced at the call site.
+pedantic = { level = "warn", priority = -1 }
+# Leftovers that must not reach main.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# An error has to become a value with a defined effect. Tests are exempt
+# through clippy.toml.
+expect_used = "warn"
+panic = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+# Arithmetic overflow stops the process instead of wrapping: a wrapped epoch,
+# attempt counter or length must never be mistaken for a valid one.
+overflow-checks = true

@@ -1,0 +1,39 @@
+# Separate workspace: cargo-fuzz needs a nightly compiler (see the `nightly`
+# shell in flake.nix), and libFuzzer must stay out of the other lockfiles.
+#
+# The lint tables follow the top-level Cargo.toml, without the lints against
+# panics: a fuzz target reports a finding by panicking.
+[workspace]
+resolver = "3"
+
+[package]
+name = "skorupa-fuzz"
+description = "Fuzz targets: one for every decoder."
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/scrappyworks/skorupa"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+skorupa-protocol = { path = "../protocol" }
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
