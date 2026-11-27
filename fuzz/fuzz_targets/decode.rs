@@ -1,4 +1,4 @@
-//! Fuzz target for the frame decoder (REQ-PROTO-002).
+//! Fuzz target for the frame decoder (REQ-PROTO-008).
 //!
 //! The decoder must return for every input. When it accepts a frame, the
 //! frame must be canonical: encoding the decoded message gives the same bytes.

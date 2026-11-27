@@ -105,10 +105,10 @@ fn assert_canonical(bytes: &[u8]) -> Result<(), TestCaseError> {
 proptest! {
     #![proptest_config(config())]
 
-    /// REQ-PROTO-001: decoding an encoded message returns that message and
+    /// REQ-PROTO-007: decoding an encoded message returns that message and
     /// the length of its frame, and leaves following bytes alone.
     #[test]
-    fn req_proto_001_round_trip(message in message(), tail in vec(any::<u8>(), 0..16)) {
+    fn req_proto_007_round_trip(message in message(), tail in vec(any::<u8>(), 0..16)) {
         let mut bytes = encoded(&message);
         let len = bytes.len();
         prop_assert_eq!(message.encoded_len(), len);
@@ -117,17 +117,17 @@ proptest! {
         prop_assert_eq!(decode(&bytes), Ok((message, len)));
     }
 
-    /// REQ-PROTO-002: the decoder returns a value for any input. A panic
+    /// REQ-PROTO-008: the decoder returns a value for any input. A panic
     /// fails this test.
     #[test]
-    fn req_proto_002_arbitrary_bytes_never_panic(bytes in vec(any::<u8>(), 0..128)) {
+    fn req_proto_008_arbitrary_bytes_never_panic(bytes in vec(any::<u8>(), 0..128)) {
         assert_canonical(&bytes)?;
     }
 
-    /// REQ-PROTO-002: the same for inputs one byte away from a valid frame,
+    /// REQ-PROTO-008: the same for inputs one byte away from a valid frame,
     /// which reach every field check.
     #[test]
-    fn req_proto_002_damaged_frames_never_panic(
+    fn req_proto_008_damaged_frames_never_panic(
         message in message(),
         index in any::<prop::sample::Index>(),
         value in any::<u8>(),
@@ -138,10 +138,10 @@ proptest! {
         assert_canonical(&bytes)?;
     }
 
-    /// REQ-PROTO-003: a frame is judged by its length prefix alone. A length
+    /// REQ-PROTO-009: a frame is judged by its length prefix alone. A length
     /// above the limit is refused before any body byte is present.
     #[test]
-    fn req_proto_003_oversized_length_refused_from_prefix(
+    fn req_proto_009_oversized_length_refused_from_prefix(
         declared in (MAX_FRAME_LEN - PREFIX_LEN + 1)..=(u32::MAX as usize),
         body in vec(any::<u8>(), 0..8),
     ) {
@@ -153,20 +153,20 @@ proptest! {
         prop_assert_eq!(decode(&bytes), error.map(|len| (golden_message(), len)));
     }
 
-    /// REQ-PROTO-004: a frame of any version but the current one is refused,
+    /// REQ-PROTO-010: a frame of any version but the current one is refused,
     /// whatever else it holds.
     #[test]
-    fn req_proto_004_other_versions_refused(message in message(), version in any::<u8>()) {
+    fn req_proto_010_other_versions_refused(message in message(), version in any::<u8>()) {
         prop_assume!(version != VERSION);
         let mut bytes = encoded(&message);
         bytes[PREFIX_LEN] = version;
         prop_assert_eq!(decode(&bytes), Err(DecodeError::UnsupportedVersion { found: version }));
     }
 
-    /// REQ-PROTO-005: part of a frame is never a message. The error says how
+    /// REQ-PROTO-011: part of a frame is never a message. The error says how
     /// many bytes the reader needs: the prefix first, then the whole frame.
     #[test]
-    fn req_proto_005_partial_frame_is_truncated(
+    fn req_proto_011_partial_frame_is_truncated(
         message in message(),
         cut in any::<prop::sample::Index>(),
     ) {
@@ -179,10 +179,10 @@ proptest! {
         );
     }
 
-    /// REQ-PROTO-008: encoding into a buffer that is too small fails and
+    /// REQ-PROTO-014: encoding into a buffer that is too small fails and
     /// reports both sizes.
     #[test]
-    fn req_proto_008_small_buffer_refused(
+    fn req_proto_014_small_buffer_refused(
         message in message(),
         size in any::<prop::sample::Index>(),
     ) {
@@ -195,10 +195,10 @@ proptest! {
         );
     }
 
-    /// REQ-PROTO-007: a session identifier with any byte outside ASCII
+    /// REQ-PROTO-013: a session identifier with any byte outside ASCII
     /// letters and digits is refused, when built and when decoded.
     #[test]
-    fn req_proto_007_session_bytes_checked(
+    fn req_proto_013_session_bytes_checked(
         session in session(),
         index in any::<prop::sample::Index>(),
         found in any::<u8>(),
@@ -221,9 +221,9 @@ proptest! {
     }
 }
 
-/// REQ-PROTO-006: the wire layout of a verdict is fixed byte for byte.
+/// REQ-PROTO-012: the wire layout of a verdict is fixed byte for byte.
 #[test]
-fn req_proto_006_verdict_layout_is_pinned() {
+fn req_proto_012_verdict_layout_is_pinned() {
     let expected: &[u8] = &[
         0x22, 0x00, 0x00, 0x00, // body length: 34
         0x01, // version
@@ -250,9 +250,9 @@ fn req_proto_006_verdict_layout_is_pinned() {
     assert_eq!(format!("{:?}", verdict.session), "SessionId(\"c2\")");
 }
 
-/// REQ-PROTO-003: the length bounds sit exactly at the documented limits.
+/// REQ-PROTO-009: the length bounds sit exactly at the documented limits.
 #[test]
-fn req_proto_003_length_bounds_are_exact() {
+fn req_proto_009_length_bounds_are_exact() {
     let largest = u32::try_from(MAX_FRAME_LEN - PREFIX_LEN).unwrap();
     assert_eq!(frame_len(largest.to_le_bytes()), Ok(MAX_FRAME_LEN));
     assert_eq!(
@@ -272,10 +272,10 @@ fn req_proto_003_length_bounds_are_exact() {
     }
 }
 
-/// REQ-PROTO-004: each of the 255 other version bytes is refused, zero
+/// REQ-PROTO-010: each of the 255 other version bytes is refused, zero
 /// included.
 #[test]
-fn req_proto_004_every_other_version_refused() {
+fn req_proto_010_every_other_version_refused() {
     for version in (0..=u8::MAX).filter(|&version| version != VERSION) {
         assert_eq!(
             decode(&frame(version, 1, &golden_payload())),
@@ -284,10 +284,10 @@ fn req_proto_004_every_other_version_refused() {
     }
 }
 
-/// REQ-PROTO-007: every field value outside the protocol is refused with its
+/// REQ-PROTO-013: every field value outside the protocol is refused with its
 /// own error, and the largest valid frame still decodes.
 #[test]
-fn req_proto_007_invalid_fields_refused() {
+fn req_proto_013_invalid_fields_refused() {
     let payload = golden_payload();
 
     for kind in (0..=u8::MAX).filter(|&kind| kind != 1) {
@@ -355,10 +355,10 @@ fn req_proto_007_invalid_fields_refused() {
     );
 }
 
-/// REQ-PROTO-007: every error names what was wrong, so a log line is enough
+/// REQ-PROTO-013: every error names what was wrong, so a log line is enough
 /// to tell the cases apart. Decisions are still made on the variant.
 #[test]
-fn req_proto_007_errors_describe_themselves() {
+fn req_proto_013_errors_describe_themselves() {
     let kind = Kind::Verdict;
     let session = SessionIdError::InvalidByte { found: b'/' };
     let decode_errors = [

@@ -12,22 +12,22 @@
 //!
 //! Rules that hold for every message, with the requirement each test names:
 //!
-//! - REQ-PROTO-001: decoding an encoded message returns that message.
-//! - REQ-PROTO-002: decoding never panics and never allocates. The crate is
+//! - REQ-PROTO-007: decoding an encoded message returns that message.
+//! - REQ-PROTO-008: decoding never panics and never allocates. The crate is
 //!   `no_std` without `alloc`, so it cannot allocate, read a clock or do I/O.
 //!   An accepted frame is canonical: it re-encodes to the same bytes, so
 //!   there are no padding bytes, trailing bytes or alternative spellings to
 //!   smuggle data in.
-//! - REQ-PROTO-003: a frame is at most [`MAX_FRAME_LEN`] bytes. The limit is
+//! - REQ-PROTO-009: a frame is at most [`MAX_FRAME_LEN`] bytes. The limit is
 //!   checked on the length prefix alone, before the body is read.
-//! - REQ-PROTO-004: a frame of another version is refused whole.
-//! - REQ-PROTO-005: part of a frame is never a message; the error says how
+//! - REQ-PROTO-010: a frame of another version is refused whole.
+//! - REQ-PROTO-011: part of a frame is never a message; the error says how
 //!   many bytes are needed.
-//! - REQ-PROTO-006: the layout of a message is fixed byte for byte.
-//! - REQ-PROTO-007: every field value outside the protocol is refused with
+//! - REQ-PROTO-012: the layout of a message is fixed byte for byte.
+//! - REQ-PROTO-013: every field value outside the protocol is refused with
 //!   its own error. Zero is never a valid version, kind or enum value, so
 //!   zeroed memory does not decode.
-//! - REQ-PROTO-008: encoding into a buffer that is too small is an error.
+//! - REQ-PROTO-014: encoding into a buffer that is too small is an error.
 //!
 //! A reader that gets any [`DecodeError`] other than
 //! [`DecodeError::Truncated`] must drop the connection. There is no way to
