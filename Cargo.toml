@@ -24,8 +24,7 @@ publish = false
 proptest = { version = "1.9", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
-# No exceptions in this workspace. The one audited GPU constructor call lives
-# in the compositor workspace.
+# No exceptions, here or in the compositor workspace.
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]

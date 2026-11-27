@@ -1,0 +1,15 @@
+[package]
+name = "skorupa-compositor-core"
+description = "Pure rules of the compositor: layout, lock, grants and frame timing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
