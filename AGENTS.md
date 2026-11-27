@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Skorupa is a small Wayland desktop for one laptop screen. Its parts run as separate processes: `compositor/` (derived from niri), `shell/`, `lock/`, and `sandbox/` for AI agents. `protocol/` is the only contract between them.
+Skorupa is a small Wayland desktop for one laptop screen. Its parts run as separate processes: `compositor/`, `shell/`, `lock/`, and `sandbox/` for AI agents. `protocol/` is the only contract between them.
 
 ## Ground rules
 
@@ -15,4 +15,3 @@ Skorupa is a small Wayland desktop for one laptop screen. Its parts run as separ
 - Put logic in pure `step(state, event) -> (state, effects)` functions, with I/O, time, and randomness in thin adapters. Bound every size, queue, and retry.
 - Start each behavior change with a `REQ-` id and a failing test. Keep tests deterministic.
 - Never log or store secrets, including in `Debug`, panics, arguments, environment, and snapshots.
-- Port niri fixes one commit at a time and keep their authorship.
