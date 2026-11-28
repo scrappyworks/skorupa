@@ -66,6 +66,8 @@ fn event() -> impl Strategy<Value = Event> {
             Event::Map { window, app_id, parent, parent_same_client, valid_token }
         }),
         2 => window().prop_map(Event::Unmap),
+        2 => (window(), proptest::option::of(window()))
+            .prop_map(|(window, parent)| Event::ParentChanged { window, parent }),
         1 => (window(), any::<bool>())
             .prop_map(|(window, valid_token)| Event::Activate { window, valid_token }),
         1 => window().prop_map(Event::FocusWindow),

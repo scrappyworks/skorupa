@@ -455,6 +455,55 @@ fn req_api_001_unsetting_toplevel_modes_always_answers_with_layout_state() {
     }
 }
 
+#[test]
+fn req_layout_004_configure_uses_a_parent_changed_before_mapping() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let parent = fixture.map(&mut client, RED);
+    let child = client.create_window();
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.last().unwrap().size, (WIDTH, HEIGHT));
+
+    child.toplevel.set_parent(Some(&parent.toplevel));
+    child.toplevel.set_maximized();
+    fixture.sync(&mut client);
+    let dialog = client.data.configures.last().unwrap();
+    assert_eq!(dialog.size, (0, 0));
+    assert!(!dialog.states.contains(&xdg_toplevel::State::TiledLeft));
+
+    child.toplevel.set_parent(None);
+    child.toplevel.set_maximized();
+    fixture.sync(&mut client);
+    let tile = client.data.configures.last().unwrap();
+    assert_eq!(tile.size, (WIDTH, HEIGHT));
+    assert!(tile.states.contains(&xdg_toplevel::State::TiledLeft));
+}
+
+#[test]
+fn req_layout_004_mapped_toplevel_follows_and_leaves_its_new_parent() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let parent = fixture.map(&mut client, RED);
+    let child = fixture.map(&mut client, BLUE);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.color(), RED);
+
+    child.toplevel.set_parent(Some(&parent.toplevel));
+    fixture.sync(&mut client);
+    fixture.advance_to(START + 2 * HZ_60);
+    assert_eq!(fixture.color(), BLUE);
+    assert_eq!(client.data.configures.last().unwrap().size, (0, 0));
+
+    child.toplevel.set_parent(None);
+    fixture.sync(&mut client);
+    fixture.advance_to(START + 3 * HZ_60);
+    assert_eq!(fixture.color(), RED);
+    assert_eq!(client.data.configures.last().unwrap().size, (WIDTH, HEIGHT));
+    fixture.select_workspace(2);
+    fixture.advance_to(START + 4 * HZ_60);
+    assert_eq!(fixture.color(), BLUE);
+}
+
 /// A client that commits a new buffer on every frame callback. The headless
 /// backend completes a flip at once, so the pacing is the reducer's alone.
 fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {

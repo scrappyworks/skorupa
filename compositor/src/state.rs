@@ -614,7 +614,8 @@ impl XdgShellHandler for State {
     fn parent_changed(&mut self, surface: ToplevelSurface) {
         // set_parent takes effect immediately. A currently unmapped parent
         // means null, even if it maps before the child's first buffer.
-        if surface.parent().is_some() && self.mapped_parent(&surface).is_none() {
+        let parent = self.mapped_parent(&surface);
+        if surface.parent().is_some() && parent.is_none() {
             with_states(surface.wl_surface(), |states| {
                 if let Some(data) = states.data_map.get::<XdgToplevelSurfaceData>()
                     && let Ok(mut role) = data.lock()
@@ -622,6 +623,18 @@ impl XdgShellHandler for State {
                     role.parent = None;
                 }
             });
+        }
+        if let Some(window) = self.windows.iter().find(|w| w.toplevel == surface) {
+            if window.mapped {
+                self.layout_event(Event::ParentChanged {
+                    window: window.id,
+                    parent,
+                });
+            } else {
+                // A mode request can trigger a configure before the first
+                // buffer. Its pending size and tiling must match this parent.
+                window.set_size(self.initial_size(&surface));
+            }
         }
     }
 
