@@ -280,14 +280,21 @@ fn req_layout_004_orphaned_dialog_inherits_the_slot() {
     let dialogs = [map(2, None, Some(1), false), map(3, None, Some(1), false)];
     let layout = run(start(), [open(1)].into_iter().chain(dialogs));
     let layout = run(layout, [map(4, None, Some(3), false), Event::Unmap(w(1))]);
-    assert_eq!(tiles(&layout), [vec![2], vec![]]);
+    assert_eq!(tiles(&layout), [vec![2], vec![3], vec![]]);
     assert_eq!(layout.parent(w(2)), None);
-    assert_eq!(layout.parent(w(3)), Some(w(2)));
+    assert_eq!(layout.parent(w(3)), None);
     assert_eq!(layout.focus(), Some(w(2)));
 
-    // A dialog in the middle of a chain hands its own dialogs to its parent.
-    let layout = run(layout, [Event::Unmap(w(3))]);
-    assert_eq!(layout.parent(w(4)), Some(w(2)));
+    assert_eq!(layout.parent(w(4)), Some(w(3)));
+    let nested = run(
+        start(),
+        [
+            open(1),
+            map(2, None, Some(1), false),
+            map(3, None, Some(2), false),
+        ],
+    );
+    assert_eq!(run(nested, [Event::Unmap(w(2))]).parent(w(3)), Some(w(1)));
 }
 
 #[test]

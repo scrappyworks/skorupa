@@ -227,6 +227,32 @@ fn req_api_001_destroyed_toplevel_leaves_the_output_while_its_surface_lives() {
 }
 
 #[test]
+fn req_layout_004_unmapped_parent_stays_detached_after_remap() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let parent = fixture.map(&mut client, RED);
+    let child = client.create_toplevel(Some(&parent));
+    fixture.sync(&mut client);
+
+    parent.surface.attach(None, 0, 0);
+    parent.surface.commit();
+    fixture.sync(&mut client);
+    parent.surface.commit();
+    fixture.sync(&mut client);
+    let red = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, RED);
+    client.commit(&parent, Some(&red));
+    fixture.sync(&mut client);
+    let blue = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&child, Some(&blue));
+    fixture.sync(&mut client);
+    fixture.advance_to(START + 2 * HZ_60);
+    assert_eq!(fixture.color(), RED);
+    fixture.select_workspace(2);
+    fixture.advance_to(START + 3 * HZ_60);
+    assert_eq!(fixture.color(), BLUE);
+}
+
+#[test]
 fn req_layout_003_setting_an_unmapped_parent_keeps_the_child_independent() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
