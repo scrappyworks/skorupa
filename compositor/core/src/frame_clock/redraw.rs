@@ -359,7 +359,7 @@ impl FramePacer {
         let mut timestamp = time.unwrap_or(now);
         let replaces_held_flip = self.held_flip.take().is_some();
 
-        if let Some(at) = self.throttle.deadline(refresh, timestamp) {
+        if let Some(at) = self.throttle.deadline(refresh, time, now) {
             if at > now {
                 self.cancel_watchdog(effects);
                 self.held_flip = Some(sequence);
@@ -373,7 +373,7 @@ impl FramePacer {
             // if the throttle timer had just fired at the dispatch time.
             timestamp = now;
             time = None;
-            self.throttle.deadline(None, now);
+            self.throttle.throttle(None, now);
         }
         if replaces_held_flip {
             effects.push(Effect::CancelTimer(Timer::Throttle));

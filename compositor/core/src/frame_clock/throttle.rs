@@ -38,9 +38,23 @@ impl VBlankThrottle {
     pub(super) fn deadline(
         &mut self,
         refresh_interval: Option<Duration>,
-        timestamp: Duration,
+        hardware_time: Option<Duration>,
+        now: Duration,
     ) -> Option<Duration> {
-        self.throttle(refresh_interval, timestamp)?;
+        if let Some(stamp) = hardware_time {
+            self.throttle(refresh_interval, stamp)?;
+        } else {
+            // Without a hardware vblank the dispatch time supplies no evidence
+            // of a new refresh cycle. Wait for the whole interval.
+            if let Some((last, refresh)) = self.last_vblank_timestamp.zip(refresh_interval) {
+                let due = last.saturating_add(refresh);
+                if now < due {
+                    return Some(due);
+                }
+            }
+            self.last_vblank_timestamp = Some(now);
+            return None;
+        }
         // A held flip keeps the last reference; dispatch may already have
         // passed its next refresh even when the hardware timestamp did not.
         Some(
