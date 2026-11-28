@@ -28,6 +28,9 @@ pub const MAX_GRANTS: usize = 16;
 /// Most consent requests that can wait behind the open prompt.
 pub const MAX_QUEUED: usize = 4;
 
+/// The most time an unanswered consent prompt can remain open.
+pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// One client connection. The adapter never reuses a value within one
 /// compositor instance, so a holder that reconnects is a stranger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -250,6 +253,13 @@ pub enum Effect {
     FreezeAgents,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OpenPrompt {
+    number: u64,
+    request: Request,
+    deadline: Duration,
+}
+
 /// Grant table and consent prompts of one compositor instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct State {
@@ -258,7 +268,7 @@ pub struct State {
     watch: SleepWatch,
     grants: Vec<Grant>,
     /// The open prompt and its number.
-    prompt: Option<(u64, Request)>,
+    prompt: Option<OpenPrompt>,
     queue: VecDeque<Request>,
     prompts: u64,
     generations: u64,
@@ -289,10 +299,14 @@ impl State {
         &self.grants
     }
 
-    /// Boot time of the next deadline: when to send [`Event::Tick`].
+    /// Boot time of the next grant or consent deadline: when to send [`Event::Tick`].
     #[must_use]
     pub fn next_expiry(&self) -> Option<Duration> {
-        self.grants.iter().map(|grant| grant.expires).min()
+        self.grants
+            .iter()
+            .map(|grant| grant.expires)
+            .chain(self.prompt.map(|prompt| prompt.deadline))
+            .min()
     }
 
     /// REQ-GRANT-005: a grant leaves the table and its end is reported in
@@ -308,17 +322,24 @@ impl State {
         });
     }
 
+    fn close_prompt(&self, effects: &mut Vec<Effect>, open: OpenPrompt, cause: Cause) {
+        let prompt = PromptId {
+            instance: self.instance,
+            number: open.number,
+        };
+        effects.extend([
+            Effect::ClosePrompt { prompt },
+            Effect::Denied {
+                request: open.request,
+                cause,
+            },
+        ]);
+    }
+
     /// Denies the open prompt and the waiting requests that `hit` selects.
     fn deny(&mut self, effects: &mut Vec<Effect>, cause: Cause, hit: impl Fn(&Request) -> bool) {
-        if let Some((number, request)) = self.prompt.take_if(|(_, request)| hit(request)) {
-            let prompt = PromptId {
-                instance: self.instance,
-                number,
-            };
-            effects.extend([
-                Effect::ClosePrompt { prompt },
-                Effect::Denied { request, cause },
-            ]);
+        if let Some(open) = self.prompt.take_if(|open| hit(&open.request)) {
+            self.close_prompt(effects, open, cause);
         }
         self.queue.retain(|request| {
             let denied = hit(request);
@@ -338,11 +359,10 @@ impl State {
     /// REQ-GRANT-015: only the open prompt of this instance can be answered,
     /// and an answer consumes it.
     fn take_prompt(&mut self, prompt: PromptId) -> Option<Request> {
-        let named = |open: &mut (u64, Request)| open.0 == prompt.number;
         let open = self
             .prompt
-            .take_if(|open| prompt.instance == self.instance && named(open));
-        open.map(|(_, request)| request)
+            .take_if(|open| prompt.instance == self.instance && open.number == prompt.number);
+        open.map(|open| open.request)
     }
 
     fn issue(&mut self, request: Request, now: Clocks, epoch: u64) -> Option<Grant> {
@@ -366,7 +386,7 @@ impl State {
 
     /// REQ-TRUST-012: at most one prompt is open; the next request in line
     /// is shown when it closes.
-    fn show_next(&mut self, effects: &mut Vec<Effect>) {
+    fn show_next(&mut self, now: Duration, effects: &mut Vec<Effect>) {
         while self.prompt.is_none()
             && let Some(request) = self.queue.pop_front()
         {
@@ -376,7 +396,11 @@ impl State {
                 continue;
             };
             self.prompts = number;
-            self.prompt = Some((number, request));
+            self.prompt = Some(OpenPrompt {
+                number,
+                request,
+                deadline: now.saturating_add(PROMPT_TIMEOUT),
+            });
             let prompt = PromptId {
                 instance: self.instance,
                 number,
@@ -385,7 +409,7 @@ impl State {
         }
     }
 
-    fn handle(&mut self, input: Input, effects: &mut Vec<Effect>) {
+    fn handle(&mut self, input: Input, prompt_was_open: bool, effects: &mut Vec<Effect>) {
         let Input { now, lock, event } = input;
         match event {
             Event::Tick => {}
@@ -442,7 +466,9 @@ impl State {
                         && grant.connection == connection
                         && grant.target == target
                 };
-                if self.grants.iter().any(claimed) {
+                // REQ-TRUST-006: keep a live grant paused through a prompt,
+                // including a delivery racing the step that times it out.
+                if !prompt_was_open && self.grants.iter().any(claimed) {
                     effects.push(Effect::Deliver { generation });
                     // REQ-AGENT-005: one delivery per agent grant.
                     self.end_grants(effects, |grant| {
@@ -508,8 +534,12 @@ pub fn step(mut state: State, input: Input) -> (State, Vec<Effect>) {
             None
         }
     });
-    state.handle(input, &mut effects);
-    state.show_next(&mut effects);
+    let prompt_was_open = state.prompt.is_some();
+    if let Some(expired) = state.prompt.take_if(|open| now.boottime >= open.deadline) {
+        state.close_prompt(&mut effects, expired, Cause::Expired);
+    }
+    state.handle(input, prompt_was_open, &mut effects);
+    state.show_next(now.boottime, &mut effects);
     debug_assert!(state.grants.len() <= MAX_GRANTS && state.queue.len() <= MAX_QUEUED);
     debug_assert!(lock.unlocked || (state.grants.is_empty() && state.prompt.is_none()));
     (state, effects)

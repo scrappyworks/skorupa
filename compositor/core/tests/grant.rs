@@ -677,7 +677,7 @@ struct Walk {
     watch: SleepWatch,
     issued: Vec<Grant>,
     dead: HashSet<u64>,
-    prompt: Option<(PromptId, Request)>,
+    prompt: Option<(PromptId, Request, Duration)>,
     prompts: u64,
     deliveries: usize,
 }
@@ -828,6 +828,7 @@ impl Walk {
         event: Event,
         generation: u64,
         delivered: bool,
+        prompt_was_open: bool,
     ) -> Result<Option<u64>, TestCaseError> {
         let claimed = |grant: &&Grant| {
             let used = Event::Use {
@@ -838,7 +839,7 @@ impl Walk {
             grant.generation == generation && event == used
         };
         let live = self.issued.iter().find(claimed).copied();
-        let live = live.filter(|_| !self.dead.contains(&generation));
+        let live = live.filter(|_| !prompt_was_open && !self.dead.contains(&generation));
         prop_assert_eq!(live.is_some(), delivered, "{:?}", event);
         prop_assert!(!delivered || self.rig.lock.unlocked);
         self.deliveries += usize::from(delivered);
@@ -883,12 +884,15 @@ impl Walk {
         let (now, lock) = (self.rig.now, self.rig.lock);
         let slept = self.watch.slept(now);
         let mut ended = self.ended_by(event, slept);
+        let prompt_was_open = self.prompt.is_some();
         // The prompt this event answers, unless the sleep or the lock closes it first.
         let answered = match event {
             Event::Answered { prompt, .. } | Event::PromptExited { prompt }
                 if !slept && lock.unlocked =>
             {
-                self.prompt.take_if(|(open, _)| *open == prompt)
+                self.prompt
+                    .take_if(|(open, _, deadline)| *open == prompt && now.boottime < *deadline)
+                    .map(|(open, request, _)| (open, request))
             }
             _ => None,
         };
@@ -902,7 +906,12 @@ impl Walk {
             match *effect {
                 Effect::Deliver { generation } | Effect::Withhold { generation } => {
                     let delivered = matches!(effect, Effect::Deliver { .. });
-                    ended.extend(self.check_delivery(event, generation, delivered)?);
+                    ended.extend(self.check_delivery(
+                        event,
+                        generation,
+                        delivered,
+                        prompt_was_open,
+                    )?);
                     answers += 1;
                 }
                 Effect::Granted(grant) => self.check_grant(event, answered, grant)?,
@@ -916,10 +925,10 @@ impl Walk {
                     // REQ-AGENT-001: in v1 nobody is even asked.
                     prop_assert!(agent_capture || request.kind != Kind::AgentCapture);
                     prop_assert!(lock.unlocked);
-                    self.prompt = Some((prompt, request));
+                    self.prompt = Some((prompt, request, now.boottime + Duration::from_secs(60)));
                 }
                 Effect::ClosePrompt { prompt } => {
-                    let open = self.prompt.take().map(|(open, _)| open);
+                    let open = self.prompt.take().map(|(open, _, _)| open);
                     prop_assert_eq!(open, Some(prompt));
                 }
                 Effect::Denied { .. } => {}
@@ -949,6 +958,7 @@ impl Walk {
             .grants()
             .iter()
             .map(|grant| grant.expires)
+            .chain(self.prompt.map(|(_, _, deadline)| deadline))
             .min();
         prop_assert_eq!(self.rig.state.next_expiry(), soonest);
         Ok(())
@@ -1003,4 +1013,39 @@ fn req_grant_001_generated_sequences_reach_the_interesting_states() {
     assert!(grants > 128, "{grants} of 256 sequences issued two grants");
     assert!(deliveries > 64, "{deliveries} of 256 delivered twice");
     assert!(ends > 100, "{ends} of 256 ended two grants");
+}
+
+#[test]
+fn req_trust_006_prompt_pauses_delivery_without_revoking_the_grant() {
+    let mut rig = Rig::v1();
+    let stream = rig.grant(STREAM);
+    rig.send(Event::Requested(TRANSFER));
+    assert!(!rig.deliver(&stream));
+    assert_eq!(rig.live(), [stream.generation]);
+    rig.answer(false);
+    assert!(rig.deliver(&stream));
+}
+
+#[test]
+fn req_trust_012_unanswered_consent_expires_before_an_answer_at_the_deadline() {
+    let mut rig = Rig::v1();
+    rig.send(Event::Requested(STREAM));
+    let prompt = rig.prompt.unwrap();
+    let timeout = Duration::from_secs(60);
+    assert_eq!(rig.state.next_expiry(), Some(rig.now.boottime + timeout));
+    rig.pass(timeout);
+    assert_eq!(
+        rig.step(Event::Answered {
+            prompt,
+            allow: true
+        }),
+        [
+            Effect::ClosePrompt { prompt },
+            Effect::Denied {
+                request: STREAM,
+                cause: Cause::Expired,
+            },
+        ]
+    );
+    assert_eq!(rig.live(), []);
 }
