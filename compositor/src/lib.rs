@@ -178,9 +178,17 @@ impl Compositor {
     ) -> Result<(), Box<dyn Error>> {
         self.state.refresh_lock_clock(now, sample);
         self.state.receive_verdict(sample);
-        self.display.dispatch_clients(&mut self.state)?;
+        // Wayland dispatch drains ready requests. While a cover is pending,
+        // only its presentation or confirmed output-off can release that work.
+        let cover_pending = self.session_phase() == Some(lock::Phase::Locking);
+        if !cover_pending {
+            self.display.dispatch_clients(&mut self.state)?;
+        }
         let now = self.state.refresh_lock_clock(now, sample);
         self.state.tick(now, sample);
+        if cover_pending && self.session_phase() == Some(lock::Phase::Locked) {
+            self.display.dispatch_clients(&mut self.state)?;
+        }
         self.display.flush_clients()?;
         Ok(())
     }
@@ -222,7 +230,9 @@ impl Compositor {
             .min()
     }
 
-    /// Readable when a client has sent something.
+    /// Readable when clients have pending requests. Use edge-triggered
+    /// readiness and also dispatch after timer and backend events: requests
+    /// stay queued while the lock waits for protected presentation.
     pub fn poll_fd(&mut self) -> BorrowedFd<'_> {
         self.display.backend().poll_fd()
     }

@@ -86,7 +86,7 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
     })?;
     let wayland = compositor.poll_fd().try_clone_to_owned()?;
     handle.insert_source(
-        Generic::new(wayland, Interest::READ, Mode::Level),
+        Generic::new(wayland, Interest::READ, Mode::Edge),
         |_, _, _| Ok(PostAction::Continue),
     )?;
 

@@ -41,7 +41,7 @@ fn run() -> Result<Infallible, Box<dyn Error>> {
     // Only wakes the loop up: the requests are read by `dispatch` below.
     let poll_fd = compositor.poll_fd().try_clone_to_owned()?;
     event_loop.handle().insert_source(
-        Generic::new(poll_fd, Interest::READ, Mode::Level),
+        Generic::new(poll_fd, Interest::READ, Mode::Edge),
         |_, _, _| Ok(PostAction::Continue),
     )?;
 

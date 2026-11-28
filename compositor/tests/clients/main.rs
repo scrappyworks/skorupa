@@ -563,6 +563,46 @@ fn lock_clocks(now: Duration) -> Clocks {
     Clocks::exact(now, now)
 }
 
+/// Client requests stay queued while a previous submission delays the cover.
+#[test]
+fn req_lock_011_pending_cover_precedes_ordinary_wayland_dispatch() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, RED);
+    fixture.advance_to(START + Duration::from_millis(1));
+    let replacement = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&window, Some(&replacement));
+    fixture.sync(&mut client);
+
+    let (socket, _broker) = UnixStream::pair().unwrap();
+    let mut session = [0; protocol::SessionId::MAX_LEN];
+    session[0] = b'1';
+    let now = lock_clocks(fixture.now);
+    fixture
+        .compositor
+        .enable_session_lock(
+            lock::Config {
+                instance: lock::InstanceId([1; 16]),
+                session: lock::SessionId(session),
+                jump_threshold: Duration::from_secs(1),
+            },
+            now,
+            socket,
+        )
+        .unwrap();
+    let request = client.sync();
+    client.flush();
+    fixture.compositor.dispatch_at(now).unwrap();
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locking));
+    client.read();
+    assert!(!client.synced(request));
+
+    fixture.advance_to(START + 2 * HZ_60);
+    client.read();
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locked));
+    assert!(client.synced(request));
+}
+
 #[test]
 fn req_auth_001_only_a_current_private_verdict_restores_the_session() {
     let mut fixture = Fixture::new(config());
