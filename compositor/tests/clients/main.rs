@@ -446,6 +446,32 @@ fn req_perf_012_time_spent_dispatching_counts_towards_the_frame_deadline() {
 }
 
 #[test]
+fn req_perf_014_frame_below_unmapped_subsurface_does_not_keep_output_awake() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (parent, _parent_role) = client.create_subsurface(&root.surface);
+    let (child, _child_role) = client.create_subsurface(&parent);
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    child.attach(Some(&buffer), 0, 0);
+    client.request_frame(&child);
+    child.commit();
+    parent.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + Duration::from_secs(2));
+    client.read();
+    assert_eq!(client.data.frames, [millis(START)]);
+    assert_eq!(fixture.compositor.next_deadline(), None);
+
+    parent.attach(Some(&buffer), 0, 0);
+    parent.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    assert_eq!(client.data.frames, [millis(START), millis(fixture.now)]);
+}
+
+#[test]
 fn req_perf_014_commit_without_damage_waits_for_the_next_refresh_cycle() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
