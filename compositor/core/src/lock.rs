@@ -463,6 +463,15 @@ impl State {
         }
     }
 
+    /// When the current authentication attempt times out, on the monotonic clock.
+    #[must_use]
+    pub const fn attempt_deadline(&self) -> Option<Duration> {
+        match self.ui {
+            Ui::Checking { deadline } => Some(deadline),
+            _ => None,
+        }
+    }
+
     /// The active token, if one can still be issued without reuse.
     #[must_use]
     pub const fn hold_token(&self) -> Option<HoldToken> {
