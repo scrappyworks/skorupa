@@ -41,7 +41,7 @@ fn window() -> impl Strategy<Value = WindowId> {
 fn event() -> impl Strategy<Value = Event> {
     let app_id = select(vec![None, Some("a".to_owned()), Some("b".to_owned())]);
     let parent = (proptest::option::of(window()), any::<bool>());
-    let map = (window(), app_id, parent, any::<bool>());
+    let map = (window(), app_id.clone(), parent, any::<bool>());
     let side = prop_oneof![-2..=3000i32, MAX_OUTPUT_SIDE - 1..=MAX_OUTPUT_SIDE + 1];
     let commands = select(vec![
         Event::FocusLeft,
@@ -69,6 +69,7 @@ fn event() -> impl Strategy<Value = Event> {
         1 => (window(), any::<bool>())
             .prop_map(|(window, valid_token)| Event::Activate { window, valid_token }),
         1 => window().prop_map(Event::FocusWindow),
+        1 => (window(), app_id).prop_map(|(window, app_id)| Event::AppIdChanged { window, app_id }),
         1 => window().prop_map(Event::Hover),
         1 => window().prop_map(Event::FocusSettled),
         2 => window().prop_map(Event::SplitWith),
@@ -357,11 +358,13 @@ proptest! {
         events in vec(event(), 1..80),
     ) {
         let mut layout = Layout::new(Size { w: 1000, h: 800 }, 40);
+        let mut in_place = layout.clone();
         let mut mapped = BTreeSet::new();
         let mut told = Told::default();
         for event in events {
             let (after, effects) = step(layout.clone(), event.clone());
-            prop_assert_eq!(&step(layout.clone(), event.clone()), &(after.clone(), effects.clone()));
+            let in_place_effects = in_place.handle(event.clone());
+            prop_assert_eq!((&in_place, &in_place_effects), (&after, &effects));
 
             match event {
                 Event::Map { window, .. } => drop(mapped.insert(window)),

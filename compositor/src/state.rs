@@ -430,6 +430,20 @@ impl State {
     }
 }
 
+fn bounded_app_id(surface: &WlSurface) -> Option<String> {
+    with_states(surface, |states| {
+        let role = states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()?
+            .lock()
+            .ok()?;
+        role.app_id
+            .as_ref()
+            .filter(|id| id.len() <= MAX_APP_ID_LEN)
+            .cloned()
+    })
+}
+
 impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor
@@ -468,17 +482,7 @@ impl CompositorHandler for State {
                 let id = window.id;
                 let event = if mapped {
                     let parent = self.mapped_parent(&self.windows[index].toplevel);
-                    let app_id = with_states(surface, |states| {
-                        let role = states
-                            .data_map
-                            .get::<XdgToplevelSurfaceData>()?
-                            .lock()
-                            .ok()?;
-                        role.app_id
-                            .as_ref()
-                            .filter(|id| id.len() <= MAX_APP_ID_LEN)
-                            .cloned()
-                    });
+                    let app_id = bounded_app_id(surface);
                     // xdg_toplevel.set_parent can only name a toplevel on its own connection.
                     Event::Map {
                         window: id,
@@ -557,6 +561,20 @@ impl XdgShellHandler for State {
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
         reply_to_mode_request(&surface);
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self
+            .windows
+            .iter()
+            .find(|w| w.mapped && w.toplevel == surface)
+        {
+            let effects = self.layout.handle(Event::AppIdChanged {
+                window: window.id,
+                app_id: bounded_app_id(surface.wl_surface()),
+            });
+            debug_assert_eq!(effects, []);
+        }
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {

@@ -1,6 +1,6 @@
 //! Adapts the window layout reducer to Smithay's logical coordinates.
 
-use skorupa_compositor_core::layout::{Configure, Effect, Event, Layout as Reducer, Size, step};
+use skorupa_compositor_core::layout::{Configure, Effect, Event, Layout as Reducer, Size};
 use smithay::utils::{Logical, Rectangle};
 
 pub use skorupa_compositor_core::layout::WindowId;
@@ -29,9 +29,7 @@ impl WorkspaceLayout {
 
 impl Layout for WorkspaceLayout {
     fn handle(&mut self, event: Event) -> Vec<Effect> {
-        let (next, effects) = step(self.0.clone(), event);
-        self.0 = next;
-        effects
+        self.0.handle(event)
     }
 
     fn configure(&self, window: WindowId) -> Option<Configure> {
