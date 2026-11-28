@@ -78,3 +78,7 @@ workspace = true
 
 [profile.release]
 overflow-checks = true
+
+[[example]]
+name = "skorupa-vm-client"
+path = "tests/clients/vm.rs"

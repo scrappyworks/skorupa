@@ -10,7 +10,7 @@ pkgs.testers.runNixOSTest {
     services.getty.autologinUser = "alice";
     hardware.graphics.enable = true;
     fonts.packages = [ pkgs.dejavu_fonts ];
-    environment.systemPackages = [ compositor pkgs.foot pkgs.wayland-utils ];
+    environment.systemPackages = [ compositor pkgs.wayland-utils ];
     virtualisation = {
       cores = 2;
       memorySize = 2048;

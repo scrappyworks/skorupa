@@ -208,7 +208,10 @@
 
         vm-session = import ./tests/vm/session.nix {
           inherit pkgs;
-          compositor = package (compositor // { CARGO_PROFILE = "dev"; });
+          compositor = package (compositor // {
+            CARGO_PROFILE = "dev";
+            cargoBuildExtraArgs = "--bin skorupa-compositor --example skorupa-vm-client";
+          });
         };
 
         main = lintAndTest main;

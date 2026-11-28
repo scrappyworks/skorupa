@@ -1,10 +1,10 @@
 # Skorupa in a NixOS VM
 
 The VM boots the Skorupa compositor on one virtio-gpu KMS output in a logind
-session. It uses software GLES, opens two foot terminals as an unprivileged
+session. It uses software GLES, opens two xdg-shell test windows as an unprivileged
 user, and switches between their workspaces by sending keys to the virtual
 keyboard. The test checks the colors on the guest output and verifies that
-the selected terminal receives the typed line. The VM stores its screenshots
+the selected window receives the typed key. The VM stores its screenshots
 in the check output.
 
 Run one VM check at a time. These commands use the default x86-64 guest.
@@ -20,7 +20,7 @@ nix build .#checks.x86_64-linux.vm-logind --print-build-logs
 For an interactive console, build
 `checks.x86_64-linux.vm-session.driverInteractive` and run
 `result/bin/nixos-test-driver`. Use `start_all()` at its prompt to boot the
-guest or `test_script()` to launch both terminals and exercise the switches.
+guest or `test_script()` to launch both windows and exercise the switches.
 The normal compositor binary still defaults to headless and opens a DRM
 seat only with `--drm`.
 
