@@ -725,7 +725,7 @@ fn op() -> impl Strategy<Value = Op> {
 /// from the inputs and from the `Granted` and `ShowPrompt` effects alone.
 struct Walk {
     rig: Rig,
-    watch: SleepWatch,
+    unobserved_sleep: Duration,
     issued: Vec<Grant>,
     dead: HashSet<u64>,
     prompt: Option<(PromptId, Request, Duration, u64)>,
@@ -737,7 +737,7 @@ impl Walk {
     fn new(agent_capture: bool) -> Self {
         Self {
             rig: Rig::new(agent_capture),
-            watch: SleepWatch::new(BOOT, THRESHOLD),
+            unobserved_sleep: Duration::ZERO,
             issued: Vec::new(),
             dead: HashSet::new(),
             prompt: None,
@@ -765,6 +765,7 @@ impl Walk {
                 return None;
             }
             Op::Sleep(time) => {
+                self.unobserved_sleep += time;
                 rig.now.boottime += time;
                 return None;
             }
@@ -883,6 +884,12 @@ impl Walk {
         delivered: bool,
         prompt_was_open: bool,
     ) -> Result<Option<u64>, TestCaseError> {
+        prop_assert!(
+            matches!(event, Event::Use { generation: requested, .. } if requested == generation),
+            "delivery reply names the wrong request: {:?}, {}",
+            event,
+            generation,
+        );
         let claimed = |grant: &&Grant| {
             let used = Event::Use {
                 generation,
@@ -936,7 +943,12 @@ impl Walk {
             return Ok(());
         };
         let (now, lock) = (self.rig.now, self.rig.lock);
-        let slept = self.watch.slept(now);
+        // The generator knows how long the machine slept. Use that independent
+        // history instead of asking the production clock detector for the answer.
+        let slept = self.unobserved_sleep > THRESHOLD;
+        if slept {
+            self.unobserved_sleep = Duration::ZERO;
+        }
         let mut ended = self.ended_by(event, slept);
         let prompt_was_open = self.prompt.is_some();
         // The prompt this event answers, unless the sleep or the lock closes it first.
