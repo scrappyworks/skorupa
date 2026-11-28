@@ -278,3 +278,38 @@ impl Verdict {
         })
     }
 }
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// REQ-PROTO-013: check the alphabet, the reported first invalid byte,
+    /// and the stored bytes at every legal session length and one beyond it.
+    #[kani::proof]
+    #[kani::unwind(34)]
+    fn req_proto_013_session_ids_preserve_exactly_the_allowed_bytes() {
+        let input: [u8; 33] = kani::any();
+        let len = usize::from(kani::any::<u8>());
+        kani::assume(len <= input.len());
+        let id = &input[..len];
+        let result = SessionId::new(id);
+        if len == 0 {
+            assert_eq!(result, Err(SessionIdError::Empty));
+        } else if len > 32 {
+            assert_eq!(result, Err(SessionIdError::TooLong { len }));
+        } else if let Some(&found) = id
+            .iter()
+            .find(|&&byte| !matches!(byte, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'))
+        {
+            assert_eq!(result, Err(SessionIdError::InvalidByte { found }));
+        } else {
+            let session = result.unwrap();
+            assert_eq!(session.as_bytes().len(), len);
+            let i = usize::from(kani::any::<u8>());
+            if i < len {
+                assert_eq!(session.as_bytes()[i], id[i]);
+            }
+            kani::cover!(len == 32, "a maximum-length identifier is accepted");
+        }
+    }
+}

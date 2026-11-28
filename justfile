@@ -80,7 +80,11 @@ fuzz-smoke:
 flake-check:
     {{ nix }} flake check --print-build-logs
 
-# Everything: the gate, then the hermetic run.
+# Prove frame prefix bounds, canonical decoding up to 38 bytes and the session ID alphabet.
+prove-protocol:
+    cargo kani -p skorupa-protocol --lib --output-format terse
+
+# Everything available in the Nix development shell.
 check-all: check flake-check
 
 # Set MERGE_GATE_CHANGE=1 when the branch changes the gate itself.

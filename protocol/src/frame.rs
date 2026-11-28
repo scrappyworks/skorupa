@@ -293,3 +293,89 @@ pub fn decode(input: &[u8]) -> Result<(Message, usize), DecodeError> {
         extra => Err(DecodeError::PayloadTooLong { kind, extra }),
     }
 }
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// REQ-PROTO-009: classify all four-byte prefixes before reading a body.
+    #[kani::proof]
+    #[kani::unwind(2)]
+    fn req_proto_009_prefix_bounds() {
+        let prefix: [u8; PREFIX_LEN] = kani::any();
+        let declared = u32::from_le_bytes(prefix);
+        // The v1 frame limit is 4096 bytes including the four-byte prefix.
+        let expected = match declared {
+            0 | 1 => Err(DecodeError::FrameTooShort { declared }),
+            2..=4092 => Ok(declared as usize + 4),
+            _ => Err(DecodeError::FrameTooLong { declared }),
+        };
+        assert_eq!(frame_len(prefix), expected);
+        let error = match expected {
+            Ok(needed) => DecodeError::Truncated {
+                needed,
+                available: PREFIX_LEN,
+            },
+            Err(error) => error,
+        };
+        assert_eq!(decode(&prefix), Err(error));
+    }
+
+    /// REQ-PROTO-008: all inputs up to the 38-byte golden verdict. Both
+    /// message kinds and both accepted and refused sessions are reachable.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn req_proto_008_short_frames_are_canonical() {
+        const CAP: usize = 38;
+        let input: [u8; CAP] = kani::any();
+        let end = usize::from(kani::any::<u8>());
+        kani::assume(end <= CAP);
+        let decoded = decode(&input[..end]);
+        // The v1 binding has 16 instance bytes, 8 epoch bytes and 4 attempt
+        // bytes. A verdict also carries an outcome before the session length.
+        let len_at = match input[5] {
+            1 if matches!(input[34], 1 | 2) => Some(35),
+            2 => Some(34),
+            _ => None,
+        };
+        if let Some(at) = len_at
+            && input[4] == 1
+            && end == at + 1 + usize::from(input[at])
+            && input[..4] == ((end - 4) as u32).to_le_bytes()
+        {
+            let id = &input[at + 1..end];
+            let error = if id.is_empty() {
+                Some(SessionIdError::Empty)
+            } else {
+                id.iter()
+                    .find(|byte| !byte.is_ascii_alphanumeric())
+                    .map(|&found| SessionIdError::InvalidByte { found })
+            };
+            if let Some(error) = error {
+                assert_eq!(decoded, Err(DecodeError::InvalidSession(error)));
+                kani::cover!(
+                    input[5] == 1 && !id.is_empty(),
+                    "invalid verdict identifier"
+                );
+                kani::cover!(
+                    input[5] == 2 && !id.is_empty(),
+                    "invalid challenge identifier"
+                );
+            }
+        }
+        if let Ok((message, used)) = decoded {
+            assert!(used <= end);
+            let mut output = [0; CAP];
+            assert_eq!(message.encode(&mut output), Ok(used));
+            let index = usize::from(kani::any::<u8>());
+            if index < used {
+                assert_eq!(output[index], input[index]);
+            }
+            kani::cover!(matches!(message, Message::Verdict(_)), "accepted verdict");
+            kani::cover!(
+                matches!(message, Message::Challenge(_)),
+                "accepted challenge"
+            );
+        }
+    }
+}

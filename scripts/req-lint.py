@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check that tests and the model are tied to requirements.
 
-1. Every `#[test]` function names a requirement: `req_proto_001_...` in its
+1. Every `#[test]` or `#[kani::proof]` function names a requirement: `req_proto_001_...` in its
    name, or `REQ-PROTO-001` in its doc comment.
 2. Every fuzz target names a requirement somewhere in its file.
 3. Every requirement named this way, and every `REQ-...` in the Quint model
@@ -27,7 +27,7 @@ REQUIREMENTS = Path("docs/requirements.md")
 # that an id in another style is reported instead of overlooked.
 ID_IN_TEXT = re.compile(r"\bREQ-[A-Z0-9]+(?:-[A-Z0-9]+)+\b")
 ID_IN_NAME = re.compile(r"(?:^|_)req_([a-z][a-z0-9]*)_([0-9]+)(?=_|$)")
-TEST_ATTRIBUTE = re.compile(r"\s*#\[test\]")
+TEST_ATTRIBUTE = re.compile(r"\s*#\[(?:test|kani::proof)\]")
 FUNCTION = re.compile(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")
 DOC_OR_ATTRIBUTE = re.compile(r"\s*(///|#\[)")
 
@@ -70,7 +70,7 @@ def main() -> int:
         for number, name, ids in tests(text.splitlines()):
             count += 1
             if name is None:
-                failures.append(f"{shown}:{number}: no function found after #[test]")
+                failures.append(f"{shown}:{number}: no function found after test or proof attribute")
             elif not ids:
                 failures.append(f"{shown}:{number}: test {name} names no requirement (REQ-...)")
             for requirement in ids:
@@ -105,7 +105,7 @@ def main() -> int:
         checked = "NOT checked"
 
     print(
-        f"req-lint: {count} tests and fuzz targets, {len(models)} model files, "
+        f"req-lint: {count} tests, proofs and fuzz targets, {len(models)} model files, "
         f"{len(used)} requirement ids: {checked}"
     )
     for failure in failures:

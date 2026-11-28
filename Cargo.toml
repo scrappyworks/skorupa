@@ -26,6 +26,8 @@ proptest = { version = "1.9", default-features = false, features = ["std"] }
 [workspace.lints.rust]
 # No exceptions, here or in the compositor workspace.
 unsafe_code = "forbid"
+# Only the main workspace owns the protocol proof harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 # Pedantic as a whole: a lint is switched off here, with a reason, when it
