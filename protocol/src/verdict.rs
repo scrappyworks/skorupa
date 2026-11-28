@@ -151,6 +151,63 @@ impl Outcome {
     }
 }
 
+/// An unlock attempt issued by the compositor to the authentication broker.
+///
+/// The payload is the verdict binding in the same order, with the outcome
+/// byte omitted. No credentials are carried on this channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Challenge {
+    /// Compositor process opening the attempt.
+    pub compositor_instance: CompositorInstance,
+    /// Login session the attempt is for.
+    pub session: SessionId,
+    /// Lock the attempt belongs to.
+    pub epoch: LockEpoch,
+    /// Attempt number within the epoch.
+    pub attempt: Attempt,
+}
+
+impl Challenge {
+    const FIXED_LEN: usize = 16 + 8 + 4 + 1;
+    pub(crate) const MAX_PAYLOAD_LEN: usize = Self::FIXED_LEN + SessionId::MAX_LEN;
+
+    pub(crate) fn payload_len(&self) -> usize {
+        Self::FIXED_LEN.saturating_add(self.session.as_bytes().len())
+    }
+
+    pub(crate) fn write(&self, writer: &mut Writer<'_>) -> Option<()> {
+        writer.put(&self.compositor_instance.0)?;
+        writer.put(&self.epoch.0.to_le_bytes())?;
+        writer.put(&self.attempt.0.to_le_bytes())?;
+        writer.put(&[self.session.len])?;
+        writer.put(self.session.as_bytes())
+    }
+
+    pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let too_short = DecodeError::PayloadTooShort {
+            kind: Kind::Challenge,
+        };
+        let compositor_instance = CompositorInstance(reader.array().ok_or(too_short)?);
+        let epoch = LockEpoch(reader.u64().ok_or(too_short)?);
+        let attempt = Attempt(reader.u32().ok_or(too_short)?);
+        let session = read_session(reader, too_short)?;
+        Ok(Self {
+            compositor_instance,
+            session,
+            epoch,
+            attempt,
+        })
+    }
+}
+
+fn read_session(reader: &mut Reader<'_>, too_short: DecodeError) -> Result<SessionId, DecodeError> {
+    let len = usize::from(reader.u8().ok_or(too_short)?);
+    if len > SessionId::MAX_LEN {
+        return Err(DecodeError::InvalidSession(SessionIdError::TooLong { len }));
+    }
+    SessionId::new(reader.bytes(len).ok_or(too_short)?).map_err(DecodeError::InvalidSession)
+}
+
 /// The authentication broker's answer to one unlock attempt.
 ///
 /// The compositor acts on a verdict only when all four bindings match its own
@@ -211,15 +268,7 @@ impl Verdict {
         let outcome = reader.u8().ok_or(too_short)?;
         let outcome =
             Outcome::from_wire(outcome).ok_or(DecodeError::UnknownOutcome { found: outcome })?;
-        let session_len = usize::from(reader.u8().ok_or(too_short)?);
-        // The length is judged before any byte of the identifier is read.
-        if session_len > SessionId::MAX_LEN {
-            return Err(DecodeError::InvalidSession(SessionIdError::TooLong {
-                len: session_len,
-            }));
-        }
-        let session = reader.bytes(session_len).ok_or(too_short)?;
-        let session = SessionId::new(session).map_err(DecodeError::InvalidSession)?;
+        let session = read_session(reader, too_short)?;
         Ok(Self {
             compositor_instance,
             session,

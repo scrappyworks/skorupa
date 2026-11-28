@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::verdict::{SessionIdError, Verdict};
+use crate::verdict::{Challenge, SessionIdError, Verdict};
 use crate::wire::{Reader, Writer};
 
 /// Size of the length prefix in bytes.
@@ -26,24 +26,29 @@ const MAX_BODY_LEN: usize = MAX_FRAME_LEN - PREFIX_LEN;
 
 // Every message must fit a frame, so encoding has no "message too long" error.
 const _: () = assert!(HEADER_LEN + Verdict::MAX_PAYLOAD_LEN <= MAX_FRAME_LEN);
+const _: () = assert!(HEADER_LEN + Challenge::MAX_PAYLOAD_LEN <= MAX_FRAME_LEN);
 
 /// Which message a frame carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// [`Verdict`]. Wire value 1.
     Verdict,
+    /// [`Challenge`]. Wire value 2.
+    Challenge,
 }
 
 impl Kind {
     const fn to_wire(self) -> u8 {
         match self {
             Self::Verdict => 1,
+            Self::Challenge => 2,
         }
     }
 
     const fn from_wire(value: u8) -> Option<Self> {
         match value {
             1 => Some(Self::Verdict),
+            2 => Some(Self::Challenge),
             _ => None,
         }
     }
@@ -54,6 +59,8 @@ impl Kind {
 pub enum Message {
     /// The authentication broker's answer to one unlock attempt.
     Verdict(Verdict),
+    /// The compositor asks the authentication broker to judge a new attempt.
+    Challenge(Challenge),
 }
 
 impl Message {
@@ -62,6 +69,7 @@ impl Message {
     pub const fn kind(&self) -> Kind {
         match self {
             Self::Verdict(_) => Kind::Verdict,
+            Self::Challenge(_) => Kind::Challenge,
         }
     }
 
@@ -70,6 +78,7 @@ impl Message {
     pub fn encoded_len(&self) -> usize {
         let payload = match self {
             Self::Verdict(verdict) => verdict.payload_len(),
+            Self::Challenge(challenge) => challenge.payload_len(),
         };
         HEADER_LEN.saturating_add(payload)
     }
@@ -99,6 +108,7 @@ impl Message {
         writer.put(&[VERSION, self.kind().to_wire()])?;
         match self {
             Self::Verdict(verdict) => verdict.write(&mut writer)?,
+            Self::Challenge(challenge) => challenge.write(&mut writer)?,
         }
         (writer.written() == needed).then_some(needed)
     }
@@ -180,7 +190,7 @@ pub enum DecodeError {
         /// Outcome byte of the payload.
         found: u8,
     },
-    /// A verdict has a malformed session identifier.
+    /// A message has a malformed session identifier.
     InvalidSession(SessionIdError),
 }
 
@@ -276,6 +286,7 @@ pub fn decode(input: &[u8]) -> Result<(Message, usize), DecodeError> {
     let kind = Kind::from_wire(kind).ok_or(DecodeError::UnknownKind { found: kind })?;
     let message = match kind {
         Kind::Verdict => Message::Verdict(Verdict::read(&mut body)?),
+        Kind::Challenge => Message::Challenge(Challenge::read(&mut body)?),
     };
     match body.remaining() {
         0 => Ok((message, frame_len)),

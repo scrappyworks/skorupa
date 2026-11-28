@@ -9,7 +9,7 @@ use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::RenderElementStates;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::pixman::PixmanRenderer;
-use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
+use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen};
 use smithay::output::Output;
 use smithay::reexports::pixman::Image;
 use smithay::utils::{Buffer, Physical, Rectangle, Size};
@@ -55,16 +55,26 @@ impl Headless {
         &mut self,
         elements: &[Element],
     ) -> Result<(bool, RenderElementStates), Box<dyn Error>> {
+        self.render_scene(elements, BACKGROUND, false)
+    }
+
+    pub(crate) fn render_scene(
+        &mut self,
+        elements: &[Element],
+        background: Color32F,
+        force_full_redraw: bool,
+    ) -> Result<(bool, RenderElementStates), Box<dyn Error>> {
         let mut framebuffer = self.renderer.bind(&mut self.image)?;
-        // One image that is never swapped, so its content is always one frame old.
+        // The one image normally holds the last frame. A cover that has to be
+        // submitted again must clear the image even if its pixels match.
         let result = self
             .tracker
             .render_output(
                 &mut self.renderer,
                 &mut framebuffer,
-                1,
+                usize::from(!force_full_redraw),
                 elements,
-                BACKGROUND,
+                background,
             )
             .map_err(|err| err.to_string())?;
         Ok((result.damage.is_some(), result.states))
@@ -82,5 +92,39 @@ impl Headless {
             .renderer
             .copy_framebuffer(&framebuffer, region, Fourcc::Argb8888)?;
         Ok(self.renderer.map_texture(&mapping)?.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use smithay::output::{Mode, PhysicalProperties, Subpixel};
+
+    use super::*;
+    use crate::frame::PROTECTED_BACKGROUND;
+
+    #[test]
+    fn req_lock_002_unchanged_cover_can_be_submitted_again() -> Result<(), Box<dyn Error>> {
+        let mode = Mode {
+            size: (2, 2).into(),
+            refresh: 60_000,
+        };
+        let output = Output::new(
+            "test-output".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: String::new(),
+                model: String::new(),
+                serial_number: String::new(),
+            },
+        );
+        output.change_current_state(Some(mode), None, None, None);
+        let mut backend = Headless::new(&output, mode.size)?;
+
+        assert!(backend.render_scene(&[], PROTECTED_BACKGROUND, false)?.0);
+        assert!(!backend.render_scene(&[], PROTECTED_BACKGROUND, false)?.0);
+        assert!(backend.render_scene(&[], PROTECTED_BACKGROUND, true)?.0);
+        assert_eq!(backend.pixels()?, 0xff00_0000_u32.to_ne_bytes().repeat(4));
+        Ok(())
     }
 }

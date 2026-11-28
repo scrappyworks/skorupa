@@ -14,7 +14,7 @@ use smithay::backend::input::{InputTime, KeyState};
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::backend::renderer::{ImportMemWl, buffer_dimensions};
 use smithay::desktop::utils::OutputPresentationFeedback;
-use smithay::input::keyboard::{FilterResult, XkbConfig, keysyms};
+use smithay::input::keyboard::{FilterResult, KeyboardSource, XkbConfig, keysyms};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -144,6 +144,8 @@ pub struct State {
     pub(crate) placements: Vec<Placement>,
     focus: Option<WindowId>,
     workspace_keys: [Option<u32>; 9],
+    session_visible: bool,
+    pub(crate) session_lock: Option<crate::session_lock::SessionLock>,
 
     pub(crate) pacer: FramePacer,
     pub(crate) timers: Timers,
@@ -216,6 +218,8 @@ impl State {
             placements: Vec::new(),
             focus: None,
             workspace_keys: [None; 9],
+            session_visible: true,
+            session_lock: None,
             pacer: FramePacer::new(config.refresh_interval(), config.flip_timeout),
             timers: Timers::default(),
             pending_feedback: None,
@@ -232,6 +236,30 @@ impl State {
 
     fn output_size(&self) -> Size<i32, Logical> {
         self.config.output_size.into()
+    }
+
+    pub(crate) fn session_visible(&self) -> bool {
+        self.session_visible
+    }
+
+    /// REQ-LOCK-003, REQ-LOCK-019: fence client focus and frame delivery before
+    /// processing the next input event or rendering the protected cover.
+    pub(crate) fn set_session_visible(&mut self, visible: bool) {
+        if self.session_visible == visible {
+            return;
+        }
+        self.session_visible = visible;
+        self.arrange();
+        if !visible {
+            self.fence_frame_feedback();
+            // The app already got wl_keyboard.leave. Clear held keys before
+            // any client regains focus.
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.release_source(self, KeyboardSource::MAIN);
+            }
+            self.workspace_keys = [None; 9];
+        }
+        self.queue_redraw();
     }
 
     /// An xdg-toplevel can only be the parent of another while mapped.
@@ -253,7 +281,11 @@ impl State {
     /// keyboard to the focused window.
     fn arrange(&mut self) {
         self.placements = self.layout.placements();
-        let focus = self.layout.focus();
+        let focus = if self.session_visible {
+            self.layout.focus()
+        } else {
+            None
+        };
 
         for index in 0..self.windows.len() {
             let window = &self.windows[index];
@@ -271,7 +303,8 @@ impl State {
                 } else {
                     state.states.unset(xdg_toplevel::State::Fullscreen);
                 }
-                if configured.is_some_and(|configured| configured.activated) {
+                if self.session_visible && configured.is_some_and(|configured| configured.activated)
+                {
                     state.states.set(xdg_toplevel::State::Activated);
                 } else {
                     state.states.unset(xdg_toplevel::State::Activated);
@@ -294,12 +327,18 @@ impl State {
                 keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
             }
         }
-        self.queue_redraw();
+        if self.session_visible {
+            self.queue_redraw();
+        }
     }
 
     /// A key of the seat's keyboard, sent to the focused window. `time` is on
     /// the presentation clock.
     pub(crate) fn key(&mut self, keycode: u32, pressed: bool, time: Duration) {
+        self.wake_drm(time);
+        if !self.session_visible {
+            return;
+        }
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
@@ -456,7 +495,9 @@ impl CompositorHandler for State {
                 window.toplevel.send_configure();
             }
         }
-        self.queue_redraw();
+        if self.session_visible {
+            self.queue_redraw();
+        }
     }
 }
 
@@ -552,3 +593,33 @@ impl OutputHandler for State {}
 impl PointerConstraintsHandler for State {}
 
 smithay::delegate_dispatch2!(State);
+
+#[cfg(test)]
+mod tests {
+    use smithay::reexports::wayland_server::Display;
+
+    use super::*;
+
+    #[test]
+    fn req_lock_003_clears_held_keys_and_skips_keys_while_fenced() -> Result<(), Box<dyn Error>> {
+        const XKB_LEFT_SHIFT: u32 = 50;
+        const XKB_LEFT_ALT: u32 = 64;
+        let display = Display::<State>::new()?;
+        let mut state = State::new(&display.handle(), Config::default())?;
+        let keyboard = state.seat.get_keyboard().ok_or("missing keyboard")?;
+        let now = Duration::from_secs(1);
+        state.key(XKB_LEFT_SHIFT, true, now);
+        assert!(keyboard.modifier_state().shift);
+
+        state.set_session_visible(false);
+        assert!(keyboard.pressed_keys().is_empty());
+        state.key(XKB_LEFT_SHIFT, false, now);
+        state.key(XKB_LEFT_ALT, true, now);
+
+        state.set_session_visible(true);
+        assert!(keyboard.pressed_keys().is_empty());
+        assert!(!keyboard.modifier_state().shift);
+        assert!(!keyboard.modifier_state().alt);
+        Ok(())
+    }
+}

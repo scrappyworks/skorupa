@@ -69,10 +69,7 @@ use skorupa_compositor_core::lock::{
 };
 
 const THRESHOLD: Duration = Duration::from_secs(1);
-const BOOT: Clocks = Clocks {
-    monotonic: Duration::from_secs(100),
-    boottime: Duration::from_secs(100),
-};
+const BOOT: Clocks = Clocks::exact(Duration::from_secs(100), Duration::from_secs(100));
 const TICK: Duration = Duration::from_millis(1);
 const TTL: Duration = Duration::from_secs(60);
 

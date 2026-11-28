@@ -52,19 +52,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         client.roundtrip()?;
         fs::write(path, [])?;
     }
+
+    let pending = marker.with_extension("pending");
+    let mut keys = Vec::new();
     loop {
         client.wait()?;
-        if client.data.keys.drain(..).any(|event| {
-            matches!(
-                event,
+        let previous = keys.len();
+        for event in client.data.keys.drain(..) {
+            let key = match event {
                 Key::Press {
                     key: 30,
                     pressed: true,
                     ..
-                }
-            )
-        }) {
-            fs::write(&marker, b"a")?;
+                } => b'a',
+                Key::Press {
+                    key: 48,
+                    pressed: true,
+                    ..
+                } => b'b',
+                _ => continue,
+            };
+            if keys.len() == 16 {
+                return Err("VM input probe received too many keys".into());
+            }
+            keys.push(key);
+        }
+        if previous != keys.len() {
+            fs::write(&pending, &keys)?;
+            fs::rename(&pending, &marker)?;
         }
     }
 }
