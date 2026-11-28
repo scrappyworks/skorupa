@@ -24,6 +24,7 @@ skorupa-protocol = { path = "../protocol" }
 # No exceptions. GPU bring-up goes through Smithay's `GbmGlesBackend`, which
 # keeps the unsafe EGL and GLES constructor calls inside Smithay.
 unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

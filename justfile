@@ -84,6 +84,10 @@ flake-check:
 prove-protocol:
     cargo kani -p skorupa-protocol --lib --output-format terse
 
+# Prove the broker verdict binding and one-use decision for the lock reducer.
+prove-unlock:
+    cargo kani --manifest-path compositor/Cargo.toml -p skorupa-compositor-core --lib --output-format terse
+
 # Everything available in the Nix development shell.
 check-all: check flake-check
 
