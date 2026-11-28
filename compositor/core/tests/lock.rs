@@ -18,7 +18,7 @@ use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 use skorupa_compositor_core::lock::{
     ATTEMPT_TIMEOUT, Binding, Clocks, Config, Content, Effect, Event, Input, InputMode, InstanceId,
-    Outcome, Phase, SessionId, SleepWatch, State, UI_BACKOFF_BASE, UI_BACKOFF_MAX, step,
+    Outcome, Phase, SessionId, State, UI_BACKOFF_BASE, UI_BACKOFF_MAX, step,
 };
 
 const CONFIG: Config = Config {
@@ -760,6 +760,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Event::LogindUnlock),
         1 => Just(Event::RenderFailed),
         1 => Just(Event::FlipFailed),
+        1 => Just(Event::OutputUnavailable),
         1 => Just(Event::OutputOff),
         1 => Just(Event::OutputOn),
         1 => Just(Event::AuthdDisconnected),
@@ -794,10 +795,18 @@ enum Ui {
     Checking,
 }
 
+/// The last observation of the physical output by the adapter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    On,
+    Off,
+    Unavailable,
+}
+
 /// What the properties need to remember, kept from inputs and effects alone.
 struct Walk {
     rig: Rig,
-    watch: SleepWatch,
+    unobserved_sleep: Duration,
     mode: InputMode,
     ui: Ui,
     challenges: Vec<Binding>,
@@ -806,7 +815,7 @@ struct Walk {
     used: HashSet<Binding>,
     /// What the frame in flight shows, if exactly one fresh frame is in flight.
     flight: Option<Content>,
-    output_on: bool,
+    panel: Panel,
     /// Open decision O-29: no unlock from a sleep release to the end of the sleep.
     held: bool,
     nonces: HashSet<u64>,
@@ -817,14 +826,14 @@ impl Walk {
     fn start() -> Self {
         Self {
             rig: Rig::start(),
-            watch: SleepWatch::new(BOOT, CONFIG.jump_threshold),
+            unobserved_sleep: Duration::ZERO,
             mode: InputMode::Nobody,
             ui: Ui::Stopped,
             challenges: Vec::new(),
             answerable: None,
             used: HashSet::new(),
             flight: None,
-            output_on: true,
+            panel: Panel::On,
             held: true,
             nonces: HashSet::new(),
             releases: 0,
@@ -838,11 +847,11 @@ impl Walk {
             Op::Plain(event) => event,
             Op::Progress => match (self.rig.state.phase(), self.ui) {
                 (Phase::Unlocked, _) => Event::Tick,
+                (Phase::Locking | Phase::Locked, _) if self.panel != Panel::On => Event::OutputOn,
                 (Phase::Locking, _) if self.flight.is_some() => {
                     Event::FramePresented(Content::Protected)
                 }
                 (Phase::Locking, _) => Event::FrameSubmitted(Content::Protected),
-                (Phase::Locked, Ui::Stopped) if !self.output_on => Event::OutputOn,
                 (Phase::Locked, Ui::Stopped) => self.rig.bridge_report_event(),
                 (Phase::Locked, Ui::Starting) => Event::UiConnected { ui: ui(false) },
                 (Phase::Locked, Ui::Connected) => Event::AttemptOpened { ui: ui(false) },
@@ -858,6 +867,7 @@ impl Walk {
             }
             Op::Sleep(by) => {
                 self.rig.now.boottime += by;
+                self.unobserved_sleep += by;
                 return None;
             }
             Op::UiConnected { stale } => Event::UiConnected { ui: ui(stale) },
@@ -897,7 +907,10 @@ impl Walk {
         prop_assert_eq!((rest, &split), (after, &effects));
 
         // What the inputs void, before the event itself is judged.
-        let slept = self.watch.slept(now);
+        let slept = self.unobserved_sleep > CONFIG.jump_threshold;
+        if slept {
+            self.unobserved_sleep = Duration::ZERO;
+        }
         let hold_ended =
             matches!(event, Event::SleepOver { token } if before.hold_token() == Some(token));
         if slept || hold_ended {
@@ -908,8 +921,10 @@ impl Walk {
             self.flight = self.flight.map(|_| Content::Session);
         }
         let timed_out = self.answerable.is_some_and(|end| now.monotonic >= end);
-        let gone = matches!(event, Event::OutputOff | Event::AuthdDisconnected)
-            || event == Event::UiExited { ui };
+        let gone = matches!(
+            event,
+            Event::OutputOff | Event::OutputUnavailable | Event::AuthdDisconnected
+        ) || event == Event::UiExited { ui };
         if slept || timed_out || gone {
             self.answerable = None;
         }
@@ -961,16 +976,17 @@ impl Walk {
         let entered = (taken.before.phase() != Phase::Locked || reacknowledged)
             && taken.after.phase() == Phase::Locked;
         prop_assert_eq!(entered, acknowledged(&taken.effects));
-        let shown = taken.event == Event::FramePresented(Content::Protected)
+        let shown = self.panel == Panel::On
+            && taken.event == Event::FramePresented(Content::Protected)
             && self.flight == Some(Content::Protected);
-        let dark = !self.output_on || taken.event == Event::OutputOff;
         match taken.event {
-            Event::OutputOff => (self.output_on, self.flight) = (false, None),
+            Event::OutputOff => (self.panel, self.flight) = (Panel::Off, None),
+            Event::OutputUnavailable => self.panel = Panel::Unavailable,
             Event::OutputOn => {
-                if !self.output_on && taken.before.phase() == Phase::Locked && !taken.slept {
+                if self.panel != Panel::On {
                     self.flight = None;
                 }
-                self.output_on = true;
+                self.panel = Panel::On;
             }
             Event::FrameSubmitted(content) => {
                 let alone = self.flight.is_none();
@@ -979,7 +995,11 @@ impl Walk {
             Event::FramePresented(_) | Event::FlipFailed => self.flight = None,
             _ => {}
         }
-        prop_assert!(!entered || shown || dark, "{:?}", taken.event);
+        prop_assert!(
+            !entered || shown || self.panel == Panel::Off,
+            "{:?}",
+            taken.event
+        );
         Ok(())
     }
 
@@ -1013,7 +1033,7 @@ impl Walk {
                 }
                 Effect::StartUi { delay, .. } => {
                     self.ui = Ui::Starting;
-                    prop_assert!(locked && delay <= UI_BACKOFF_MAX);
+                    prop_assert!(delay <= UI_BACKOFF_MAX);
                 }
                 // REQ-LOCK-024: released only while `Locked`, for a request
                 // of this wake period.
@@ -1037,10 +1057,34 @@ impl Walk {
         if let Event::PrepareForSleep { nonce } = taken.event {
             self.nonces.insert(nonce);
         }
+        // A timeout can schedule a delayed restart just before seat loss
+        // cancels that same restart. Observe the effects in adapter order.
+        prop_assert!(self.ui == Ui::Stopped || (locked && self.panel == Panel::On && !self.held));
         // REQ-LOCK-003, REQ-LOCK-019: clients have the input exactly while unlocked.
         prop_assert_eq!(self.mode == InputMode::Session, after.unlocked);
         Ok(())
     }
+}
+
+/// A tag from a simulated driver alone cannot certify what an unavailable
+/// display is showing. Feed the checker a false acknowledgement explicitly.
+#[test]
+fn req_lock_002_unavailable_output_cannot_certify_a_protected_flip() {
+    let mut walk = Walk::start();
+    walk.run(Op::Plain(Event::FrameSubmitted(Content::Protected)))
+        .unwrap();
+    walk.run(Op::Plain(Event::OutputUnavailable)).unwrap();
+    let after = Rig::locked().state;
+    let false_ack = Taken {
+        before: walk.rig.state,
+        after,
+        event: Event::FramePresented(Content::Protected),
+        effects: vec![Effect::LockAcknowledged {
+            epoch: after.view().epoch,
+        }],
+        slept: false,
+    };
+    assert!(walk.check_acknowledgement(&false_ack).is_err());
 }
 
 /// One executed step, as the properties see it.
