@@ -1,5 +1,7 @@
 """REQ-LAYOUT-003/006 and REQ-INPUT-002 on a real guest seat and KMS output."""
 
+from datetime import timedelta
+
 from PIL import Image
 
 machine.start()
@@ -15,9 +17,9 @@ def start_client(number: int) -> None:
     name = f"client-{number}"
     machine.succeed(
         f"{user} systemd-run --user --unit={name} -E WAYLAND_DISPLAY=wayland-1 "
-        f"skorupa-vm-client {number} {runtime_dir}/{name}.input"
+        f"skorupa-vm-client {number} {runtime_dir}/{name}.input {runtime_dir}/{name}.mapped"
     )
-    machine.wait_until_succeeds(f"{user} systemctl --user is-active --quiet {name}")
+    machine.wait_for_file(f"{runtime_dir}/{name}.mapped", timeout=timedelta(seconds=10))
 
 
 def verify_screen(name: str, color: tuple[int, int, int]) -> None:
