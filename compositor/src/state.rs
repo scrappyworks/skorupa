@@ -340,10 +340,7 @@ impl State {
                     state.states.unset(xdg_toplevel::State::Activated);
                 }
             });
-            // The first configure answers the client's first commit, not this.
-            if window.toplevel.is_initial_configure_sent() {
-                window.toplevel.send_pending_configure();
-            }
+            admission::send_layout_configure(&window.toplevel);
         }
 
         if focus != self.focus {
@@ -554,7 +551,7 @@ impl CompositorHandler for State {
             let window = &self.windows[index];
             if !window.toplevel.is_initial_configure_sent() {
                 window.set_size(self.initial_size(&window.toplevel));
-                window.toplevel.send_configure();
+                admission::send_configure(&window.toplevel);
             }
         }
         if self.session_visible {
@@ -577,13 +574,23 @@ impl ShmHandler for State {
 // require a configure even when the layout keeps the same size and states.
 fn reply_to_mode_request(surface: &ToplevelSurface) {
     if surface.is_initial_configure_sent() {
-        surface.send_configure();
+        admission::send_configure(surface);
     }
 }
 
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell
+    }
+
+    fn ack_configure(&mut self, surface: WlSurface, _: smithay::wayland::shell::xdg::Configure) {
+        if let Some(window) = self
+            .windows
+            .iter()
+            .find(|window| window.toplevel.wl_surface() == &surface)
+        {
+            admission::send_layout_configure(&window.toplevel);
+        }
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
