@@ -1,6 +1,7 @@
 //! One connector on the logind seat, through Smithay's safe GBM/GLES backend.
 
 use std::error::Error;
+use std::time::Duration;
 
 use skorupa_compositor_core::lock::Content;
 use smithay::backend::allocator::Fourcc;
@@ -175,6 +176,7 @@ pub(crate) struct Devices {
     drm: DrmDeviceNotifier,
     input: Libinput,
     crtc: crtc::Handle,
+    interface: connector::Interface,
 }
 
 fn select_connector(
@@ -296,7 +298,14 @@ impl Drm {
             .map_err(|err| err.to_string())?;
         drop(renderer);
 
-        let devices = Devices::new(session, notifier, drm_notifier, &seat, crtc)?;
+        let devices = Devices::new(
+            session,
+            notifier,
+            drm_notifier,
+            &seat,
+            crtc,
+            connector.interface(),
+        )?;
         let drm = Self {
             manager,
             surface,
@@ -477,6 +486,7 @@ impl Devices {
         drm: DrmDeviceNotifier,
         seat: &str,
         crtc: crtc::Handle,
+        interface: connector::Interface,
     ) -> Result<Self, Box<dyn Error>> {
         let mut input = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
             seat_session.into(),
@@ -489,6 +499,7 @@ impl Devices {
             drm,
             input,
             crtc,
+            interface,
         })
     }
 
@@ -501,6 +512,7 @@ impl Devices {
             drm,
             mut input,
             crtc,
+            interface,
         } = self;
         handle.insert_source(
             LibinputInputBackend::new(input.clone()),
@@ -534,10 +546,7 @@ impl Devices {
 
         handle.insert_source(drm, move |event, metadata, compositor| match event {
             DrmEvent::VBlank(event_crtc) if event_crtc == crtc => {
-                let time = metadata.as_ref().and_then(|metadata| match metadata.time {
-                    DrmEventTime::Monotonic(time) => Some(time),
-                    DrmEventTime::Realtime(_) => None,
-                });
+                let time = presentation_sample(interface, metadata.as_ref().map(|m| m.time));
                 let sequence = metadata.as_ref().map_or(0, |metadata| metadata.sequence);
                 let clocks = read_lock_clocks();
                 compositor.state.lock_clock(clocks);
@@ -549,6 +558,22 @@ impl Devices {
             DrmEvent::Error(err) => tracing::warn!(%err, "DRM event failed"),
         })?;
         Ok(())
+    }
+}
+
+// A virtual connector can complete as soon as the backend flushes a commit.
+// Its event time is not a sample of a physical vblank. Use software pacing.
+fn presentation_sample(
+    interface: connector::Interface,
+    stamp: Option<DrmEventTime>,
+) -> Option<Duration> {
+    match (interface, stamp) {
+        (interface, Some(DrmEventTime::Monotonic(time)))
+            if interface != connector::Interface::Virtual =>
+        {
+            Some(time)
+        }
+        _ => None,
     }
 }
 

@@ -375,7 +375,7 @@ impl State {
                     time,
                     refresh,
                     sequence,
-                    hw_clock,
+                    ..
                 } => {
                     if let Some(mut feedback) = self.pending_feedback.take() {
                         if !self.session_visible() {
@@ -383,13 +383,9 @@ impl State {
                             continue;
                         }
                         let refresh = refresh.map_or(Refresh::Unknown, Refresh::Fixed);
-                        let flags = if hw_clock {
-                            wp_presentation_feedback::Kind::Vsync
-                                | wp_presentation_feedback::Kind::HwClock
-                                | wp_presentation_feedback::Kind::HwCompletion
-                        } else {
-                            wp_presentation_feedback::Kind::empty()
-                        };
+                        // DRM_CAP_TIMESTAMP_MONOTONIC identifies the clock domain.
+                        // KMS events carry no hardware-measurement or vblank provenance.
+                        let flags = wp_presentation_feedback::Kind::empty();
                         feedback.presented::<_, Monotonic>(
                             time,
                             refresh,
@@ -517,18 +513,7 @@ impl State {
         };
         match backend.complete() {
             DrmFlip::Presented(content) => {
-                self.timers.cover.recovery_signal(now);
-                // REQ-LOCK-002 uses KMS completion even when the pacer delays client feedback.
-                self.lock_event(LockEvent::FramePresented(content));
-                self.pace(
-                    now,
-                    Event::FlipCompleted {
-                        now,
-                        time,
-                        sequence,
-                    },
-                    &mut crate::read_lock_clocks,
-                );
+                self.presented_drm(now, time, sequence, content);
             }
             DrmFlip::Expired => {
                 self.timers.cover.recovery_signal(now);
@@ -543,6 +528,27 @@ impl State {
             }
             DrmFlip::Ignored => {}
         }
+    }
+
+    pub(crate) fn presented_drm(
+        &mut self,
+        now: Duration,
+        time: Option<Duration>,
+        sequence: u32,
+        content: Content,
+    ) {
+        self.timers.cover.recovery_signal(now);
+        // REQ-LOCK-002 uses KMS completion even when the pacer delays client feedback.
+        self.lock_event(LockEvent::FramePresented(content));
+        self.pace(
+            now,
+            Event::FlipCompleted {
+                now,
+                time,
+                sequence,
+            },
+            &mut crate::read_lock_clocks,
+        );
     }
 
     pub(crate) fn pause_drm(&mut self) {

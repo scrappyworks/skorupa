@@ -125,6 +125,8 @@ pub enum Effect {
         time: Duration,
         refresh: Option<Duration>,
         sequence: u32,
+        /// The backend supplied a timestamp on the presentation clock. Its
+        /// provenance is insufficient to set the presentation protocol's `hw_clock` flag.
         hw_clock: bool,
     },
     /// The flip did not complete in time. The frame counts as lost: discard
