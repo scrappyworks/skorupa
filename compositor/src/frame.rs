@@ -439,6 +439,12 @@ impl State {
         }
     }
 
+    fn needs_cover_frame(&self) -> bool {
+        self.session_lock
+            .as_ref()
+            .is_some_and(crate::session_lock::SessionLock::needs_cover_frame)
+    }
+
     fn render(
         &mut self,
         now: Duration,
@@ -446,11 +452,7 @@ impl State {
         sample: &mut impl FnMut() -> Clocks,
     ) -> (RenderOutcome, bool) {
         let protected = content == Content::Protected;
-        let force_full_redraw = protected
-            && self
-                .session_lock
-                .as_ref()
-                .is_some_and(crate::session_lock::SessionLock::needs_cover_frame);
+        let force_full_redraw = protected && self.needs_cover_frame();
         if let Backend::Drm(backend) = &mut self.backend {
             if !backend.ready_to_render(content) {
                 return (RenderOutcome::Skipped, false);
@@ -485,6 +487,9 @@ impl State {
             return (RenderOutcome::Failed, true);
         }
 
+        // A resume in the sample above can require another presentation
+        // even when the old and new covers have identical pixels.
+        let force_full_redraw = protected && self.needs_cover_frame();
         let rendered = match &mut self.backend {
             Backend::Headless(backend) => {
                 let placements = if protected { &[][..] } else { &self.placements };
