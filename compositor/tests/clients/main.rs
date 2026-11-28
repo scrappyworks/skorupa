@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use client::{Client, Key, Presented, Window};
 use skorupa_compositor::core::lock::{self, Clocks, Phase};
-use skorupa_compositor::protocol::{self, Challenge, LockEpoch, Message, Outcome, Verdict};
+use skorupa_compositor::protocol::{self, Challenge, LockEpoch, Message, Outcome};
 use skorupa_compositor::{Compositor, Config};
 use wayland_client::protocol::wl_shm::Format;
 use wayland_protocols::xdg::shell::client::xdg_toplevel;
@@ -831,13 +831,7 @@ fn open_attempt(fixture: &mut Fixture, peer: &mut UnixStream) -> Challenge {
 }
 
 fn send_verdict(peer: &mut UnixStream, challenge: Challenge) {
-    let message = Message::Verdict(Verdict {
-        compositor_instance: challenge.compositor_instance,
-        session: challenge.session,
-        epoch: challenge.epoch,
-        attempt: challenge.attempt,
-        outcome: Outcome::Granted,
-    });
+    let message = Message::Verdict(challenge.verdict(Outcome::Granted));
     let mut frame = [0; protocol::MAX_FRAME_LEN];
     let len = message.encode(&mut frame).unwrap();
     peer.write_all(&frame[..len]).unwrap();

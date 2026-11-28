@@ -417,12 +417,16 @@ fn req_auth_001_challenge_has_a_distinct_wire_kind_and_binding() {
     let Message::Verdict(verdict) = golden_message() else {
         panic!("invalid verdict fixture");
     };
-    let challenge = Message::Challenge(Challenge {
+    let challenge = Challenge {
         compositor_instance: verdict.compositor_instance,
         session: verdict.session,
         epoch: verdict.epoch,
         attempt: verdict.attempt,
-    });
+    };
+    for outcome in [Outcome::Denied, Outcome::Granted] {
+        assert_eq!(challenge.verdict(outcome), Verdict { outcome, ..verdict });
+    }
+    let challenge = Message::Challenge(challenge);
     assert_eq!(decode(&bytes), Ok((challenge, bytes.len())));
     assert_eq!(encoded(&challenge), bytes);
 }

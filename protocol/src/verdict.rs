@@ -168,6 +168,18 @@ pub struct Challenge {
 }
 
 impl Challenge {
+    /// Binds the broker's decision to the exact attempt named by this challenge.
+    #[must_use]
+    pub const fn verdict(self, outcome: Outcome) -> Verdict {
+        Verdict {
+            compositor_instance: self.compositor_instance,
+            session: self.session,
+            epoch: self.epoch,
+            attempt: self.attempt,
+            outcome,
+        }
+    }
+
     const FIXED_LEN: usize = 16 + 8 + 4 + 1;
     pub(crate) const MAX_PAYLOAD_LEN: usize = Self::FIXED_LEN + SessionId::MAX_LEN;
 
