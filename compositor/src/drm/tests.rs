@@ -333,3 +333,44 @@ fn req_perf_003_mode_selection_keeps_raw_refresh_and_skips_invalid_timings() {
     });
     assert_eq!(select_mode(&[usable, faster]).unwrap().0, faster);
 }
+
+#[test]
+fn req_api_010_applied_attachment_is_checked_before_the_renderer_consumes_it() {
+    use smithay::backend::renderer::utils::with_renderer_surface_state;
+    use smithay::wayland::compositor::{
+        BufferAssignment, CompositorHandler, SurfaceAttributes, with_states,
+    };
+    use wayland_client::protocol::{wl_shm, wl_surface};
+
+    let mut compositor = Compositor::new(Config {
+        output_size: (2, 2),
+        ..Config::default()
+    })
+    .unwrap();
+    let mut client = connect(&mut compositor);
+    let window = client.create_window();
+    exchange(&mut compositor, &mut client);
+    let buffer = client.buffer(2, 2, wl_shm::Format::Xrgb8888, 0xff00_ff00);
+    client.commit(&window, Some(&buffer));
+    exchange(&mut compositor, &mut client);
+
+    // Exercise the applied-state boundary independently of the pre-commit hook.
+    let surface = compositor.state.windows[0].toplevel.wl_surface().clone();
+    let resource =
+        with_renderer_surface_state(&surface, |state| (**state.buffer().unwrap()).clone()).unwrap();
+    compositor.state.config.max_buffer_size = (1, 1);
+    with_states(&surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .current()
+            .buffer = Some(BufferAssignment::NewBuffer(resource));
+    });
+    compositor.state.commit(&surface);
+    exchange(&mut compositor, &mut client);
+    let error = client
+        .protocol_error()
+        .expect("applied buffer must be checked");
+    assert_eq!(error.object_interface, "wl_surface");
+    assert_eq!(error.code, wl_surface::Error::InvalidSize as u32);
+}

@@ -8,6 +8,7 @@ mod dispatch;
 pub(crate) mod geometry;
 mod subsurface_position;
 
+use std::cell::Cell;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -30,11 +31,11 @@ use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::{self, WlSurface};
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
-use smithay::utils::{Logical, SERIAL_COUNTER, Serial, Size};
+use smithay::utils::{Buffer, Logical, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SUBSURFACE_ROLE,
-    SurfaceAttributes, add_pre_commit_hook, get_role, with_states,
+    SurfaceAttributes, SurfaceData, add_pre_commit_hook, get_role, with_states,
 };
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
@@ -88,6 +89,11 @@ impl Config {
         Some(Duration::from_nanos(nanos))
     }
 }
+
+/// A sync subsurface can retain a committed buffer before the renderer sees
+/// it. Remember only its dimensions for the next client commit.
+#[derive(Default)]
+struct CommittedBufferSize(Cell<Option<Size<i32, Buffer>>>);
 
 pub(crate) struct Window {
     pub(crate) id: WindowId,
@@ -428,32 +434,88 @@ impl State {
         self.arrange();
     }
 
-    /// Refuses a pending buffer above the configured size before anything
-    /// reads it: the buffer is dropped from the commit and the client gets a
-    /// protocol error, which disconnects it.
-    fn refuse_oversized_buffer(&self, surface: &WlSurface) {
+    fn buffer_size_error(&self, size: Size<i32, Buffer>, scale: i32) -> Option<String> {
         let (max_w, max_h) = self.config.max_buffer_size;
-        let oversized = with_states(surface, |states| {
+        if size.w > max_w || size.h > max_h {
+            Some(format!(
+                "buffer of {}x{} is larger than the limit of {max_w}x{max_h}",
+                size.w, size.h
+            ))
+        } else if size.w % scale != 0 || size.h % scale != 0 {
+            Some(format!(
+                "buffer of {}x{} is not divisible by scale {scale}",
+                size.w, size.h
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn check_attachment(
+        &self,
+        states: &SurfaceData,
+        attributes: &mut SurfaceAttributes,
+    ) -> Option<String> {
+        let retained = states.data_map.get_or_insert(CommittedBufferSize::default);
+        let size = match &attributes.buffer {
+            Some(BufferAssignment::NewBuffer(buffer)) => buffer_dimensions(buffer),
+            Some(BufferAssignment::Removed) => None,
+            None => retained.0.get(),
+        };
+        if let Some(reason) =
+            size.and_then(|size| self.buffer_size_error(size, attributes.buffer_scale))
+        {
+            attributes.buffer = None;
+            return Some(reason);
+        }
+        retained.0.set(size);
+        None
+    }
+
+    fn check_buffer_size(&self, surface: &WlSurface) {
+        let error = with_states(surface, |states| {
+            self.check_attachment(
+                states,
+                states.cached_state.get::<SurfaceAttributes>().pending(),
+            )
+        });
+        if let Some(reason) = error {
+            surface.post_error(wl_surface::Error::InvalidSize, reason);
+        }
+    }
+
+    /// Smithay reads a change in buffer scale or transform only with a buffer
+    /// assignment. Reuse its retained buffer after the transaction applies; an
+    /// actual replacement or removal in the same commit always wins.
+    fn apply_buffer_mapping(&self, surface: &WlSurface) {
+        let error = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            let pending = attributes.pending();
-            let Some(BufferAssignment::NewBuffer(buffer)) = &pending.buffer else {
-                return None;
-            };
-            let size = buffer_dimensions(buffer)?;
-            if size.w <= max_w && size.h <= max_h {
+            let current = attributes.current();
+            if current.buffer.is_some() {
+                // A synchronized child can enter a parent transaction without
+                // a child pre-commit hook. Validate each applied attachment.
+                return self.check_attachment(states, current);
+            }
+            let renderer = states
+                .data_map
+                .get::<RendererSurfaceStateUserData>()?
+                .lock()
+                .ok()?;
+            if current.buffer_scale == renderer.buffer_scale()
+                && smithay::utils::Transform::from(current.buffer_transform)
+                    == renderer.buffer_transform()
+            {
                 return None;
             }
-            pending.buffer = None;
-            Some(size)
+            let buffer = renderer.buffer()?;
+            let error = self.buffer_size_error(buffer_dimensions(buffer)?, current.buffer_scale);
+            if error.is_none() {
+                current.buffer = Some(BufferAssignment::NewBuffer((**buffer).clone()));
+            }
+            error
         });
-        if let Some(size) = oversized {
-            surface.post_error(
-                wl_surface::Error::InvalidSize,
-                format!(
-                    "buffer of {}x{} is larger than the limit of {max_w}x{max_h}",
-                    size.w, size.h
-                ),
-            );
+        if let Some(reason) = error {
+            surface.post_error(wl_surface::Error::InvalidSize, reason);
         }
     }
 }
@@ -470,29 +532,6 @@ fn bounded_app_id(surface: &WlSurface) -> Option<String> {
             .filter(|id| id.len() <= MAX_APP_ID_LEN)
             .cloned()
     })
-}
-/// Smithay reads a change in buffer scale or transform only with a buffer
-/// assignment. Reuse its retained buffer after the transaction applies; an
-/// actual replacement or removal in the same commit always wins.
-fn apply_buffer_mapping(surface: &WlSurface) {
-    with_states(surface, |states| {
-        let Some(renderer) = states.data_map.get::<RendererSurfaceStateUserData>() else {
-            return;
-        };
-        let Ok(renderer) = renderer.lock() else {
-            return;
-        };
-        let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-        let current = attributes.current();
-        if current.buffer.is_none()
-            && (current.buffer_scale != renderer.buffer_scale()
-                || smithay::utils::Transform::from(current.buffer_transform)
-                    != renderer.buffer_transform())
-            && let Some(buffer) = renderer.buffer()
-        {
-            current.buffer = Some(BufferAssignment::NewBuffer((**buffer).clone()));
-        }
-    });
 }
 
 impl CompositorHandler for State {
@@ -524,7 +563,7 @@ impl CompositorHandler for State {
 
     fn new_surface(&mut self, surface: &WlSurface) {
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
-            state.refuse_oversized_buffer(surface);
+            state.check_buffer_size(surface);
             subsurface_position::capture(surface);
             geometry::capture(surface);
         });
@@ -539,7 +578,7 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         subsurface_position::apply(surface);
-        apply_buffer_mapping(surface);
+        self.apply_buffer_mapping(surface);
         on_commit_buffer_handler::<Self>(surface);
         if let Some(index) = self
             .windows
