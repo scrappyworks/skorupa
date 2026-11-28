@@ -81,6 +81,23 @@ impl Compositor {
         Ok(())
     }
 
+    /// Dispatches one iteration and returns the time to wait for the next
+    /// deadline. Read the presentation clock again after dispatch so time
+    /// spent rendering counts toward the wait. An overdue deadline gives
+    /// a zero wait and an idle compositor gives `None`.
+    ///
+    /// # Errors
+    /// Returns errors from [`Self::dispatch`].
+    pub fn dispatch_timeout(
+        &mut self,
+        mut now: impl FnMut() -> Duration,
+    ) -> Result<Option<Duration>, Box<dyn Error>> {
+        self.dispatch(now())?;
+        Ok(self
+            .next_deadline()
+            .map(|deadline| deadline.saturating_sub(now())))
+    }
+
     /// When [`dispatch`](Self::dispatch) has to run again even if no client
     /// sends anything. A time that is not after `now` means at once.
     #[must_use]

@@ -234,6 +234,31 @@ fn req_perf_012_headless_frames_are_one_interval_apart_at_180_hz() {
 }
 
 #[test]
+fn req_perf_012_time_spent_dispatching_counts_towards_the_frame_deadline() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, RED);
+    let buffer = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&window, Some(&buffer));
+    client.flush();
+
+    let draw_cost = Duration::from_millis(5);
+    let mut times = [START, START + draw_cost].into_iter();
+    let wait = fixture
+        .compositor
+        .dispatch_timeout(|| times.next().unwrap())
+        .unwrap();
+    assert_eq!(wait, HZ_60.checked_sub(draw_cost));
+
+    let mut times = [START + draw_cost, START + HZ_60].into_iter();
+    let wait = fixture
+        .compositor
+        .dispatch_timeout(|| times.next().unwrap())
+        .unwrap();
+    assert_eq!(wait, Some(Duration::ZERO));
+}
+
+#[test]
 fn req_perf_014_commit_without_damage_waits_for_the_next_refresh_cycle() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
