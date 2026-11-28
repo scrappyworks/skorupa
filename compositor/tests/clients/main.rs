@@ -310,6 +310,63 @@ fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {
 }
 
 #[test]
+fn req_perf_015_replacing_a_buffer_discards_its_feedback_without_a_new_request() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let first = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, GREEN);
+    let replacement = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&root, Some(&first));
+    root.surface.attach(Some(&replacement), 0, 0);
+    root.surface.damage_buffer(0, 0, WIDTH, HEIGHT);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    client.read();
+    assert_eq!(fixture.color(), BLUE);
+    assert_eq!(client.data.presented.len(), 1);
+    assert_eq!(client.data.discarded, 1);
+}
+
+#[test]
+fn req_perf_015_only_superseded_child_commits_lose_their_feedback() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, _role) = client.create_subsurface(&root.surface);
+    let first = client.buffer(2, 2, Format::Xrgb8888, GREEN);
+    let replacement = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+
+    child.attach(Some(&first), 0, 0);
+    client.request_presentation(&child);
+    child.commit();
+    child.attach(Some(&replacement), 0, 0);
+    child.damage_buffer(0, 0, 2, 2);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    client.read();
+    assert_eq!(fixture.color(), BLUE);
+    assert_eq!(client.data.presented.len(), 1);
+    assert_eq!(client.data.discarded, 1);
+
+    child.attach(Some(&first), 0, 0);
+    child.damage_buffer(0, 0, 2, 2);
+    client.request_presentation(&child);
+    child.commit();
+    root.surface.commit();
+    // No new child commit. Merging its state again must keep its feedback.
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    client.read();
+    assert_eq!(fixture.color(), GREEN);
+    assert_eq!(client.data.presented.len(), 2);
+    assert_eq!(client.data.discarded, 1);
+}
+
+#[test]
 fn req_perf_015_feedback_carries_the_time_of_each_flip_at_60_hz() {
     presents_one_interval_apart(60_000, HZ_60);
 }

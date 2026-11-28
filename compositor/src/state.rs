@@ -4,6 +4,7 @@
 //! keyboard, `wl_output` and `wp_presentation`, each for every client.
 
 mod admission;
+mod feedback;
 
 use std::error::Error;
 use std::time::Duration;
@@ -446,10 +447,12 @@ impl CompositorHandler for State {
     fn new_surface(&mut self, surface: &WlSurface) {
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
             state.refuse_oversized_buffer(surface);
+            feedback::capture(surface);
         });
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        feedback::apply(surface);
         on_commit_buffer_handler::<Self>(surface);
         if let Some(index) = self
             .windows
