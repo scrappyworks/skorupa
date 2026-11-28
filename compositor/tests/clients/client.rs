@@ -250,6 +250,14 @@ impl Client {
         buffer
     }
 
+    pub fn request_presentation(&self, surface: &WlSurface) {
+        self.data
+            .presentation
+            .as_ref()
+            .unwrap()
+            .feedback(surface, &self.qh, ());
+    }
+
     /// Commits the buffer as fully damaged, asking for a frame callback and
     /// for presentation feedback.
     pub fn commit(&mut self, window: &Window, buffer: Option<&WlBuffer>) {
@@ -258,8 +266,7 @@ impl Client {
             window.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
         }
         window.surface.frame(&self.qh, CallbackKind::Frame);
-        let presentation = self.data.presentation.as_ref().unwrap();
-        presentation.feedback(&window.surface, &self.qh, ());
+        self.request_presentation(&window.surface);
         window.surface.commit();
     }
 }
