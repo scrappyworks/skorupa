@@ -162,6 +162,7 @@ fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
 
     let window = client.create_window();
     fixture.sync(&mut client);
+    assert_eq!(client.data.wm_capabilities.as_deref(), Some([].as_slice()));
     assert_eq!(client.data.configures.len(), 1);
     assert_eq!(client.data.configures[0].size, (WIDTH, HEIGHT));
     assert!(!client.data.configures[0].activated());

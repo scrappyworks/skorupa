@@ -77,6 +77,7 @@ pub struct Data {
     /// Current mode of the output: width, height, refresh in mHz.
     pub mode: Option<(i32, i32, i32)>,
     pub clock_id: Option<u32>,
+    pub wm_capabilities: Option<Vec<u8>>,
     pending_configure: Option<Configure>,
     pub configures: Vec<Configure>,
     /// Times of the frame callbacks, in milliseconds.
@@ -396,7 +397,9 @@ impl Dispatch<XdgToplevel, ()> for Data {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let xdg_toplevel::Event::Configure {
+        if let xdg_toplevel::Event::WmCapabilities { capabilities } = event {
+            state.wm_capabilities = Some(capabilities);
+        } else if let xdg_toplevel::Event::Configure {
             width,
             height,
             states,

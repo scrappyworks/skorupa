@@ -203,7 +203,9 @@ impl State {
         let mut state = Self {
             config,
             compositor: CompositorState::new::<Self>(dh),
-            xdg_shell: XdgShellState::new::<Self>(dh),
+            // Client-requested fullscreen, maximize, minimize and window menus
+            // have no adapter yet. Toolkits use this list for their controls.
+            xdg_shell: XdgShellState::new_with_capabilities::<Self>(dh, []),
             shm,
             seats,
             seat,
