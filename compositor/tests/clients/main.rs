@@ -127,9 +127,14 @@ impl Fixture {
 
     /// The color of the top left pixel of the last frame, without alpha.
     fn color(&mut self) -> u32 {
+        self.pixel(0, 0)
+    }
+
+    fn pixel(&mut self, x: i32, y: i32) -> u32 {
         let pixels = self.compositor.pixels().unwrap();
         assert_eq!(pixels.len(), usize::try_from(WIDTH * HEIGHT * 4).unwrap());
-        u32::from_ne_bytes(*pixels.first_chunk().unwrap()) | 0xff00_0000
+        let index = usize::try_from(y * WIDTH + x).unwrap();
+        u32::from_ne_bytes(pixels.as_chunks::<4>().0[index]) | 0xff00_0000
     }
 }
 
@@ -269,6 +274,78 @@ fn req_api_001_window_geometry_must_intersect_the_surface_tree() {
         assert_eq!(error.object_interface, "xdg_surface");
         assert_eq!(error.code, xdg_surface::Error::InvalidSize as u32);
     }
+}
+
+#[test]
+fn req_api_001_desync_child_position_applies_on_its_parent_commit() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, role) = client.create_subsurface(&root.surface);
+    role.set_desync();
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.color(), BLUE);
+
+    role.set_position(WIDTH, 0);
+    root.xdg_surface.set_window_geometry(WIDTH, 0, 2, 2);
+    root.surface.commit();
+    fixture.exchange(&mut client);
+    assert!(client.protocol_error().is_none());
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!(fixture.color(), BLUE);
+}
+
+#[test]
+fn req_layout_018_desync_child_commit_keeps_the_parent_position_pending() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, role) = client.create_subsurface(&root.surface);
+    role.set_desync();
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    role.set_position(3, 0);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!((fixture.color(), fixture.pixel(3, 0)), (BLUE, RED));
+
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!((fixture.color(), fixture.pixel(3, 0)), (RED, BLUE));
+}
+
+#[test]
+fn req_api_001_synced_parent_latches_only_its_own_child_position_request() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (parent, _parent_role) = client.create_subsurface(&root.surface);
+    let (leaf, role) = client.create_subsurface(&parent);
+    role.set_desync();
+    let leaf_buffer = client.buffer(1, 1, Format::Xrgb8888, GREEN);
+    leaf.attach(Some(&leaf_buffer), 0, 0);
+    leaf.commit();
+    let parent_buffer = client.buffer(6, 3, Format::Xrgb8888, BLUE);
+    parent.attach(Some(&parent_buffer), 0, 0);
+    role.set_position(2, 0);
+    parent.commit();
+    role.set_position(4, 0);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!((fixture.pixel(2, 0), fixture.pixel(4, 0)), (GREEN, BLUE));
+
+    parent.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!((fixture.pixel(2, 0), fixture.pixel(4, 0)), (BLUE, GREEN));
 }
 
 #[test]

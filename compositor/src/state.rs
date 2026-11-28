@@ -6,6 +6,7 @@
 mod admission;
 mod dispatch;
 pub(crate) mod geometry;
+mod subsurface_position;
 
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -483,6 +484,7 @@ impl CompositorHandler for State {
     fn new_surface(&mut self, surface: &WlSurface) {
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
             state.refuse_oversized_buffer(surface);
+            subsurface_position::capture(surface);
             geometry::capture(surface);
         });
     }
@@ -495,6 +497,7 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        subsurface_position::apply(surface);
         on_commit_buffer_handler::<Self>(surface);
         if let Some(index) = self
             .windows
