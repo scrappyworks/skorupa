@@ -14,7 +14,7 @@ default:
     @just --list --unsorted
 
 # The merge gate. Checks formatting and changes no file.
-check: (lint-test "Cargo.toml") (lint-test "compositor/Cargo.toml") lint-fuzz budget req-lint deny
+check: (lint-test "Cargo.toml") (lint-test "compositor/Cargo.toml") lint-fuzz budget req-lint fuzz-smoke-config deny
 
 # Clippy and the tests come from ONE compilation: Cargo builds the test
 # targets with clippy-driver in place of rustc for workspace crates, and
@@ -60,6 +60,11 @@ deny:
     cargo deny --locked --manifest-path Cargo.toml --config deny.toml check {{ deny_flags }}
     cargo deny --locked --manifest-path compositor/Cargo.toml --config deny.toml check {{ deny_flags }}
     cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check {{ deny_flags }}
+
+# Check the fuzz wrapper's run count without building a target.
+[private]
+fuzz-smoke-config:
+    bash tests/scripts/fuzz-smoke.sh
 
 # FUZZ_SMOKE_RUNS sets the number of inputs per target (default 100000).
 #
