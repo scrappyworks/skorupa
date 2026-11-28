@@ -388,7 +388,10 @@ impl State {
                             feedback.discarded();
                             continue;
                         }
-                        let refresh = refresh.map_or(Refresh::Unknown, Refresh::Fixed);
+                        // The presentation protocol carries the interval in u32 nanoseconds.
+                        let refresh = refresh
+                            .filter(|interval| u32::try_from(interval.as_nanos()).is_ok())
+                            .map_or(Refresh::Unknown, Refresh::Fixed);
                         let flags = if hw_clock {
                             wp_presentation_feedback::Kind::Vsync
                                 | wp_presentation_feedback::Kind::HwClock

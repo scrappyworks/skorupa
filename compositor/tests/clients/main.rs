@@ -630,6 +630,34 @@ fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {
     assert_eq!(client.data.presented.len(), 20);
 }
 
+/// REQ-API-001, REQ-PERF-015: `wl_output` uses mHz, presentation uses `u32` nanoseconds.
+#[test]
+fn req_api_001_refresh_is_representable_in_each_wire_protocol() {
+    for (refresh_mhz, mode_mhz, feedback_ns) in [
+        (i32::MIN, 0, 0),
+        (-1, 0, 0),
+        (0, 0, 0),
+        (232, 232, 0), // The 4.31 s interval exceeds u32::MAX nanoseconds.
+        (233, 233, 4_291_845_494),
+    ] {
+        let mut fixture = Fixture::new(Config {
+            refresh_mhz,
+            ..config()
+        });
+        let mut client = fixture.connect();
+        assert_eq!(client.data.mode, Some((WIDTH, HEIGHT, mode_mhz)));
+
+        let _window = fixture.map(&mut client, RED);
+        fixture.advance_to(START + Duration::from_secs(5));
+        client.read();
+        assert_eq!(
+            client.data.presented.last().map(|p| p.refresh),
+            Some(Duration::from_nanos(feedback_ns)),
+            "presentation interval for {refresh_mhz} mHz"
+        );
+    }
+}
+
 #[test]
 fn req_perf_015_feedback_carries_the_time_of_each_flip_at_60_hz() {
     presents_one_interval_apart(60_000, HZ_60);

@@ -56,7 +56,7 @@ const PRESENTATION_CLOCK: u32 = 1;
 pub struct Config {
     /// Output size in pixels; the scale is 1.
     pub output_size: (i32, i32),
-    /// Refresh rate in mHz.
+    /// Refresh rate in mHz. A nonpositive value means the rate is unknown.
     pub refresh_mhz: i32,
     /// Largest client buffer that is accepted, in pixels per side. Enough
     /// for an 8K video frame; anything larger is refused before it is read.
@@ -165,7 +165,7 @@ impl State {
     pub(crate) fn new(dh: &DisplayHandle, config: Config) -> Result<Self, Box<dyn Error>> {
         let mode = Mode {
             size: config.output_size.into(),
-            refresh: config.refresh_mhz,
+            refresh: config.refresh_mhz.max(0),
         };
         let output = Output::new(
             "HEADLESS-1".into(),
