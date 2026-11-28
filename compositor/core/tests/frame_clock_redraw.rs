@@ -493,13 +493,14 @@ fn req_perf_003_steady_state_at_60_hz_targets_every_refresh() {
 fn immediate_flips(refresh: Duration, time_known: bool) {
     let mut output = Harness::new(Some(refresh));
     let start = ms(1000);
-    let mut presented = Vec::new();
+    let mut released = Vec::new();
     let mut now = start;
 
     for _ in 0..50 {
         // The client commits as soon as it may; the backend completes at once.
         output.redraw(now);
         output.rendered(now, RenderOutcome::Submitted);
+        let completion = now;
         let mut effects = output.flip(now, time_known.then_some(now), 0);
         if let Some(at) = output.deadline(Timer::Throttle) {
             assert!(
@@ -511,15 +512,17 @@ fn immediate_flips(refresh: Duration, time_known: bool) {
             now = at;
             effects = output.fire(Timer::Throttle);
         }
-        presented.extend(effects.iter().filter_map(|effect| match *effect {
-            Effect::Presented { time, .. } => Some(time),
-            _ => None,
-        }));
+        for effect in effects {
+            if let Effect::Presented { time, .. } = effect {
+                assert_eq!(time, if time_known { completion } else { now });
+                released.push(now);
+            }
+        }
         assert_eq!(output.state(), RedrawState::Idle);
     }
 
     let expected: Vec<Duration> = (0..50).map(|frame| start + refresh * frame).collect();
-    assert_eq!(presented, expected);
+    assert_eq!(released, expected);
 }
 
 #[test]
@@ -535,7 +538,7 @@ fn req_perf_012_immediate_flips_are_presented_one_interval_apart_at_180_hz() {
 }
 
 #[test]
-fn req_perf_012_held_flip_is_reported_without_a_hardware_timestamp() {
+fn req_perf_015_throttling_retains_the_timestamp_of_a_completed_flip() {
     let mut output = Harness::new(Some(HZ_60));
     output.redraw(ms(10));
     output.rendered(ms(10), RenderOutcome::Submitted);
@@ -564,10 +567,10 @@ fn req_perf_012_held_flip_is_reported_without_a_hardware_timestamp() {
         output.fire(Timer::Throttle),
         [
             Effect::Presented {
-                time: ms(10) + HZ_60,
+                time: ms(11),
                 refresh: Some(HZ_60),
                 sequence: 0,
-                hw_clock: false
+                hw_clock: true
             },
             callbacks(2),
         ]
@@ -638,21 +641,24 @@ fn req_perf_015_held_flip_cannot_complete_a_later_submission() {
 
 #[test]
 fn req_perf_012_delayed_dispatch_consumes_the_elapsed_throttle_interval() {
-    let mut output = Harness::new(Some(ms(10)));
-    output.redraw(ms(90));
-    output.rendered(ms(90), RenderOutcome::Submitted);
-    output.flip(ms(100), Some(ms(100)), 1);
-    output.redraw(ms(100));
-    output.rendered(ms(100), RenderOutcome::Submitted);
-    let effects = output.flip(ms(120), Some(ms(101)), 2);
+    // A dispatch at the deadline can publish immediately, just like a later one.
+    for dispatch in [ms(110), ms(120)] {
+        let mut output = Harness::new(Some(ms(10)));
+        output.redraw(ms(90));
+        output.rendered(ms(90), RenderOutcome::Submitted);
+        output.flip(ms(100), Some(ms(100)), 1);
+        output.redraw(ms(100));
+        output.rendered(ms(100), RenderOutcome::Submitted);
+        let effects = output.flip(dispatch, Some(ms(101)), 2);
 
-    assert!(effects.contains(&Effect::Presented {
-        time: ms(120),
-        refresh: Some(ms(10)),
-        sequence: 2,
-        hw_clock: false,
-    }));
-    assert_eq!(output.timers, [None; 3]);
+        assert!(effects.contains(&Effect::Presented {
+            time: ms(101),
+            refresh: Some(ms(10)),
+            sequence: 2,
+            hw_clock: true,
+        }));
+        assert_eq!(output.timers, [None; 3]);
+    }
 }
 
 /// A client that commits without damage on every frame callback must not spin:
@@ -806,5 +812,84 @@ proptest! {
         }
         prop_assert_eq!(output.state(), RedrawState::Idle);
         prop_assert_eq!(output.timers, [None; 3]);
+    }
+}
+
+#[test]
+fn req_perf_012_software_flip_between_half_and_full_refresh_waits() {
+    let mut output = Harness::new(Some(ms(10)));
+    output.redraw(ms(100));
+    output.rendered(ms(100), RenderOutcome::Submitted);
+    output.flip(ms(100), None, 1);
+    output.redraw(ms(106));
+    output.rendered(ms(106), RenderOutcome::Submitted);
+    let early = output.flip(ms(106), None, 2);
+    assert!(early.iter().all(|e| !matches!(e, Effect::Presented { .. })));
+    assert_eq!(output.deadline(Timer::Throttle), Some(ms(110)));
+    assert!(output.fire(Timer::Throttle).contains(&Effect::Presented {
+        time: ms(110),
+        refresh: Some(ms(10)),
+        sequence: 2,
+        hw_clock: false,
+    }));
+}
+
+#[test]
+fn req_perf_012_software_flip_without_a_known_rate_uses_the_fallback() {
+    let mut output = Harness::new(None);
+    output.redraw(ms(100));
+    output.rendered(ms(100), RenderOutcome::Submitted);
+    output.flip(ms(100), None, 1);
+    output.redraw(ms(106));
+    output.rendered(ms(106), RenderOutcome::Submitted);
+    output.flip(ms(106), None, 2);
+    let at = ms(100) + Duration::from_micros(16_667);
+    assert_eq!(output.deadline(Timer::Throttle), Some(at));
+    assert!(output.fire(Timer::Throttle).contains(&Effect::Presented {
+        time: at,
+        refresh: None,
+        sequence: 2,
+        hw_clock: false,
+    }));
+}
+
+#[test]
+fn req_perf_013_unknown_refresh_cannot_hold_a_flip_until_a_corrupt_timestamp() {
+    let mut output = Harness::new(None);
+    output.redraw(ms(100));
+    output.rendered(ms(100), RenderOutcome::Submitted);
+    let first = output.flip(ms(100), Some(Duration::MAX), 1);
+    assert!(first.contains(&Effect::Anomaly(Anomaly::FlipFarInFuture)));
+    output.redraw(ms(106));
+    output.rendered(ms(106), RenderOutcome::Submitted);
+    output.flip(ms(106), None, 2);
+    assert_eq!(
+        output.deadline(Timer::Throttle),
+        Some(ms(100) + Duration::from_micros(16_667))
+    );
+}
+
+#[test]
+fn req_perf_015_late_throttle_delivery_keeps_each_flips_presentation_time() {
+    for (kernel_time, expected) in [(None, ms(110)), (Some(ms(101)), ms(101))] {
+        let mut output = Harness::new(Some(ms(10)));
+        output.redraw(ms(100));
+        output.rendered(ms(100), RenderOutcome::Submitted);
+        output.flip(ms(100), kernel_time.map(|_| ms(100)), 1);
+        output.redraw(ms(101));
+        output.rendered(ms(101), RenderOutcome::Submitted);
+        output.flip(ms(101), kernel_time, 2);
+        assert_eq!(output.deadline(Timer::Throttle), Some(ms(110)));
+
+        let effects = output.send(Event::TimerFired {
+            timer: Timer::Throttle,
+            now: ms(145),
+        });
+        assert!(effects.contains(&Effect::Presented {
+            time: expected,
+            refresh: Some(ms(10)),
+            sequence: 2,
+            hw_clock: kernel_time.is_some(),
+        }));
     }
 }
