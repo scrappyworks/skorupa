@@ -123,6 +123,7 @@ with subtest("seat loss invalidates an open verdict before the next cover"):
     machine.succeed("chvt 2")
     wait_marker("vt-fenced")
     signal("answer-6")
+    wait_marker("vt-verdict-handled")
     machine.fail(f"test -e {control}/challenge-7")
     machine.succeed("chvt 1")
     wait_challenge(7)
