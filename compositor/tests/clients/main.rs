@@ -235,6 +235,72 @@ fn req_layout_003_setting_an_unmapped_parent_keeps_the_child_independent() {
 }
 
 #[test]
+fn req_layout_018_tiled_window_uses_effective_surface_geometry() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = client.create_window();
+    fixture.sync(&mut client);
+    window
+        .xdg_surface
+        .set_window_geometry(-4, -3, WIDTH + 4, HEIGHT + 3);
+    let buffer = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, RED);
+    client.commit(&window, Some(&buffer));
+    fixture.sync(&mut client);
+    assert_eq!(fixture.color(), RED);
+}
+
+#[test]
+fn req_api_001_window_geometry_must_intersect_the_surface_tree() {
+    use wayland_protocols::xdg::shell::client::xdg_surface;
+
+    for (x, y) in [(WIDTH, 0), (0, HEIGHT + 1)] {
+        let mut fixture = Fixture::new(config());
+        let mut client = fixture.connect();
+        let window = fixture.map(&mut client, RED);
+        window.xdg_surface.set_window_geometry(x, y, 1, 1);
+        window.surface.commit();
+        fixture.exchange(&mut client);
+        let error = client.protocol_error().expect("empty effective geometry");
+        assert_eq!(error.object_interface, "xdg_surface");
+        assert_eq!(error.code, xdg_surface::Error::InvalidSize as u32);
+    }
+}
+
+#[test]
+fn req_layout_018_explicit_geometry_is_reclamped_only_on_a_new_request() {
+    let mut fixture = Fixture::new(config());
+    let background = fixture.color();
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, role) = client.create_subsurface(&root.surface);
+    role.set_position(-2, 0);
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    root.xdg_surface
+        .set_window_geometry(-2, 0, WIDTH + 2, HEIGHT);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.color(), BLUE);
+
+    child.attach(None, 0, 0);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!(fixture.color(), background);
+
+    // Repeating the same raw rectangle is a fresh geometry request.
+    root.xdg_surface
+        .set_window_geometry(-2, 0, WIDTH + 2, HEIGHT);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 3);
+    assert_eq!(fixture.color(), RED);
+}
+
+#[test]
 fn req_layout_004_dialog_chooses_its_size_and_is_centered_over_its_parent() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();

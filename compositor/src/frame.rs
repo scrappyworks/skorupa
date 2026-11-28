@@ -24,17 +24,16 @@ use smithay::backend::renderer::element::{
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::{Color32F, ImportAll, Renderer};
 use smithay::desktop::utils::{
-    OutputPresentationFeedback, bbox_from_surface_tree, send_frames_surface_tree,
-    surface_primary_scanout_output, take_presentation_feedback_surface_tree,
-    update_surface_primary_scanout_output, with_surfaces_surface_tree,
+    OutputPresentationFeedback, send_frames_surface_tree, surface_primary_scanout_output,
+    take_presentation_feedback_surface_tree, update_surface_primary_scanout_output,
+    with_surfaces_surface_tree,
 };
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Monotonic, Point, Rectangle};
-use smithay::wayland::compositor::{SurfaceAttributes, SurfaceData, with_states};
+use smithay::wayland::compositor::{SurfaceAttributes, SurfaceData};
 use smithay::wayland::presentation::Refresh;
-use smithay::wayland::shell::xdg::SurfaceCachedState;
 use tracing::warn;
 
 use crate::drm::DrmFlip;
@@ -68,25 +67,15 @@ where
             continue;
         };
         let surface = window.toplevel.wl_surface();
-        let geometry = with_states(surface, |states| {
-            states
-                .cached_state
-                .get::<SurfaceCachedState>()
-                .current()
-                .geometry
-        });
+        let geometry = crate::state::geometry::effective(surface);
         let origin = if window.dialog {
-            let bounds = bbox_from_surface_tree(surface, (0, 0));
-            let geometry = geometry
-                .and_then(|geom| geom.intersection(bounds))
-                .unwrap_or(bounds);
             let center_offset = Point::from((
                 (rect.size.w - geometry.size.w) / 2,
                 (rect.size.h - geometry.size.h) / 2,
             ));
             rect.loc + center_offset - geometry.loc
         } else {
-            rect.loc - geometry.map_or_else(Point::default, |geometry| geometry.loc)
+            rect.loc - geometry.loc
         };
         elements.extend(render_elements_from_surface_tree(
             renderer,

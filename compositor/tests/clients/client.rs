@@ -98,7 +98,8 @@ impl Data {
 
 pub struct Window {
     pub surface: WlSurface,
-    _xdg_surface: XdgSurface,
+    #[allow(dead_code)] // Read by the headless geometry test.
+    pub xdg_surface: XdgSurface,
     toplevel: XdgToplevel,
 }
 
@@ -199,7 +200,7 @@ impl Client {
         surface.commit();
         Window {
             surface,
-            _xdg_surface: xdg_surface,
+            xdg_surface,
             toplevel,
         }
     }
