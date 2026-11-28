@@ -21,6 +21,7 @@ use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{ClientData, GlobalId};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
+use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::{self, WlSurface};
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
@@ -514,6 +515,14 @@ impl ShmHandler for State {
     }
 }
 
+// The first surface commit receives the initial layout. Later mode requests
+// require a configure even when the layout keeps the same size and states.
+fn reply_to_mode_request(surface: &ToplevelSurface) {
+    if surface.is_initial_configure_sent() {
+        surface.send_configure();
+    }
+}
+
 impl XdgShellHandler for State {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell
@@ -532,6 +541,22 @@ impl XdgShellHandler for State {
             mapped: false,
             dialog: false,
         });
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        reply_to_mode_request(&surface);
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        reply_to_mode_request(&surface);
+    }
+
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _: Option<WlOutput>) {
+        reply_to_mode_request(&surface);
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        reply_to_mode_request(&surface);
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {

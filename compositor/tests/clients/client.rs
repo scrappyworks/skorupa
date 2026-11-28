@@ -100,7 +100,7 @@ pub struct Window {
     pub surface: WlSurface,
     #[allow(dead_code)] // Read by the headless geometry test.
     pub xdg_surface: XdgSurface,
-    toplevel: XdgToplevel,
+    pub toplevel: XdgToplevel,
 }
 
 pub struct Client {
@@ -181,6 +181,12 @@ impl Client {
     }
 
     pub fn create_toplevel(&mut self, parent: Option<&Window>) -> Window {
+        let window = self.create_role(parent);
+        window.surface.commit();
+        window
+    }
+
+    pub fn create_role(&mut self, parent: Option<&Window>) -> Window {
         let surface = self
             .data
             .compositor
@@ -197,7 +203,6 @@ impl Client {
         if let Some(parent) = parent {
             toplevel.set_parent(Some(&parent.toplevel));
         }
-        surface.commit();
         Window {
             surface,
             xdg_surface,
