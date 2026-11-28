@@ -93,7 +93,7 @@ pub enum Event {
     FlipCompleted {
         now: Duration,
         time: Option<Duration>,
-        sequence: u32,
+        sequence: u64,
     },
     TimerFired {
         now: Duration,
@@ -124,7 +124,7 @@ pub enum Effect {
     Presented {
         time: Duration,
         refresh: Option<Duration>,
-        sequence: u32,
+        sequence: u64,
         /// The backend supplied a timestamp on the presentation clock. Its
         /// provenance is insufficient to set the presentation protocol's `hw_clock` flag.
         hw_clock: bool,
@@ -159,7 +159,7 @@ pub struct FramePacer {
     /// Target of the render that was asked for and not answered yet.
     target: Option<Duration>,
     /// Sequence of a completed flip that the throttle holds back.
-    held_flip: Option<u32>,
+    held_flip: Option<u64>,
     watchdog_armed: bool,
     /// After the last redraw, some ongoing animations still remain.
     unfinished_animations_remain: bool,
@@ -345,7 +345,7 @@ impl FramePacer {
         &mut self,
         now: Duration,
         time: Option<Duration>,
-        sequence: u32,
+        sequence: u64,
         effects: &mut Vec<Effect>,
     ) {
         // A hardware stamp slightly ahead of dispatch is common. A stamp

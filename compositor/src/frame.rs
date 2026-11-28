@@ -362,7 +362,7 @@ impl State {
                             Event::FlipCompleted {
                                 now: at,
                                 time: None,
-                                sequence,
+                                sequence: u64::from(sequence),
                             },
                             sample,
                         );
@@ -386,12 +386,7 @@ impl State {
                         // DRM_CAP_TIMESTAMP_MONOTONIC identifies the clock domain.
                         // KMS events carry no hardware-measurement or vblank provenance.
                         let flags = wp_presentation_feedback::Kind::empty();
-                        feedback.presented::<_, Monotonic>(
-                            time,
-                            refresh,
-                            u64::from(sequence),
-                            flags,
-                        );
+                        feedback.presented::<_, Monotonic>(time, refresh, sequence, flags);
                     }
                 }
                 Effect::FlipTimedOut => {
@@ -507,7 +502,7 @@ impl State {
         }
     }
 
-    pub(crate) fn complete_drm(&mut self, now: Duration, time: Option<Duration>, sequence: u32) {
+    pub(crate) fn complete_drm(&mut self, now: Duration, time: Option<Duration>, sequence: u64) {
         let Backend::Drm(backend) = &mut self.backend else {
             return;
         };
@@ -534,7 +529,7 @@ impl State {
         &mut self,
         now: Duration,
         time: Option<Duration>,
-        sequence: u32,
+        sequence: u64,
         content: Content,
     ) {
         self.timers.cover.recovery_signal(now);

@@ -186,7 +186,7 @@ fn present_session_frame(
     state: &mut State,
     rendered: frame::RenderedFrame,
     stamp: Duration,
-    sequence: u32,
+    sequence: u64,
 ) {
     use skorupa_compositor_core::frame_clock::{Event, RenderOutcome};
     // Mirror the queued submission before exercising the KMS completion and
@@ -252,14 +252,25 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
     signaled.store(true, Ordering::Relaxed);
     let first = frames.submit(|_, _| Ok(())).unwrap();
     let first_stamp = Duration::from_millis(999);
-    present_session_frame(&mut compositor.state, first, first_stamp, 1);
+    let mut vblank = CrtcSequence::default();
+    present_session_frame(
+        &mut compositor.state,
+        first,
+        first_stamp,
+        vblank.observe(Some(u32::MAX)),
+    );
     exchange(&mut compositor, &mut client);
     assert_eq!(client.data.discarded, 0);
     assert_eq!(client.data.presented.len(), 1);
 
     let second = render_session(&mut compositor.state);
     let second_stamp = Duration::from_millis(1999);
-    present_session_frame(&mut compositor.state, second, second_stamp, 2);
+    present_session_frame(
+        &mut compositor.state,
+        second,
+        second_stamp,
+        vblank.observe(Some(0)),
+    );
     exchange(&mut compositor, &mut client);
     assert_eq!(
         client
@@ -268,7 +279,10 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
             .iter()
             .map(|feedback| (feedback.sequence, feedback.time, feedback.flags))
             .collect::<Vec<_>>(),
-        [(1, first_stamp, 0), (2, second_stamp, 0)]
+        [
+            (u64::from(u32::MAX), first_stamp, 0),
+            (1 << 32, second_stamp, 0)
+        ]
     );
 }
 
@@ -292,4 +306,31 @@ fn req_perf_012_virtual_connector_uses_software_pacing_even_with_a_kernel_stamp(
         None
     );
     assert_eq!(presentation_sample(EmbeddedDisplayPort, None), None);
+}
+
+#[test]
+fn req_perf_015_missing_flip_metadata_preserves_the_vblank_counter() {
+    let mut vblank = CrtcSequence::default();
+    let sequences = [
+        Some(u32::MAX - 1),
+        None,
+        Some(u32::MAX),
+        Some(0),
+        None,
+        Some(0),
+        Some(2),
+    ];
+    let observed = sequences.map(|low| vblank.observe(low));
+    assert_eq!(
+        observed,
+        [
+            u64::from(u32::MAX - 1),
+            0,
+            u64::from(u32::MAX),
+            1 << 32,
+            0,
+            1 << 32,
+            (1 << 32) + 2
+        ]
+    );
 }
