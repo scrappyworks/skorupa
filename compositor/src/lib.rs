@@ -1,9 +1,4 @@
-//! Wayland compositor for one screen.
-//!
-//! Stage 1 is headless: real Wayland clients, the Pixman software renderer
-//! drawing into memory, and frame timing from the pure reducer in
-//! `skorupa-compositor-core`. The session lock path reads both clocks at
-//! its I/O boundaries. Tests can instead dispatch with explicit readings.
+//! Wayland compositor for one screen, backed by DRM/KMS or an in-memory Pixman output.
 
 mod drm;
 mod frame;
@@ -58,16 +53,14 @@ impl Compositor {
         Ok(Self { display, state })
     }
 
-    /// Starts covered and attaches the private, connected authd endpoint.
+    /// Fences ordinary input, schedules the cover, and attaches the authd endpoint.
     ///
-    /// The session launcher is responsible for handing the other endpoint
-    /// exclusively to authd. The endpoint is independent of the Wayland
-    /// listener and carries only the authentication challenge and verdict.
+    /// The launcher must give the peer exclusively to authd. The lock reaches
+    /// [`lock::Phase::Locked`] after the backend presents the cover.
     ///
     /// # Errors
-    /// When the lock is already enabled, the session identifier is invalid
-    /// or the socket cannot be configured. A setup error leaves the output
-    /// covered and ordinary input fenced.
+    /// Returns `AlreadyExists` for a second installation. An invalid session
+    /// identifier or socket setup error leaves input fenced and the cover queued.
     pub fn enable_session_lock(
         &mut self,
         config: lock::Config,
@@ -93,7 +86,7 @@ impl Compositor {
         self.state.session_lock.as_ref().map(SessionLock::phase)
     }
 
-    /// Locks the session from a trusted input or service adapter.
+    /// Requests a lock from a trusted input or service adapter.
     pub fn request_lock(&mut self, now: Clocks) {
         self.state.lock_clock(now);
         self.state.lock_event(lock::Event::LockRequested);
@@ -124,13 +117,15 @@ impl Compositor {
             .and_then(SessionLock::pending_ui)
     }
 
-    /// The trusted prompt adapter opens the named attempt once it is ready.
+    /// Opens the attempt for the serial from [`Self::pending_lock_ui`].
+    /// The serial must still be current and its scheduled time must have arrived.
     pub fn open_lock_attempt(&mut self, now: Clocks, ui: u32) {
         self.state.lock_clock(now);
         self.state.open_lock_attempt(ui);
     }
 
-    /// Wakes the loop on a verdict or a disconnect. Dispatch reads the socket.
+    /// The event loop can poll this descriptor for a verdict or a disconnect.
+    /// [`Self::dispatch_at`] owns reads from it.
     #[must_use]
     pub fn authd_fd(&self) -> Option<BorrowedFd<'_>> {
         self.state
@@ -208,8 +203,9 @@ impl Compositor {
         self.display.backend().poll_fd()
     }
 
-    /// Presses or releases a key of the seat's keyboard. The headless
-    /// backend has no input device, so this is its only source of keys.
+    /// Presses or releases a key of the seat's keyboard.
+    /// With the session lock enabled this reads both system clocks. Use
+    /// [`Self::key_at`] to supply controlled times for the lock and seat.
     pub fn key(&mut self, keycode: u32, pressed: bool, now: Duration) {
         if self.state.session_lock.is_some() {
             self.key_at(keycode, pressed, read_lock_clocks());

@@ -1,6 +1,5 @@
-//! Test-only driver for the lock scenario on the NixOS VM's actual Wayland seat.
-//! The scripted broker sees only a connected descriptor. No verdict path is
-//! added to the shipping binary or to an ordinary Wayland client.
+//! Test driver for the NixOS lock scenario. A separate broker inherits the
+//! peer descriptor so the guest exercises the real authd socket boundary.
 
 use std::error::Error;
 use std::fs::{self, File};
@@ -90,16 +89,16 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         |_, _, _| Ok(PostAction::Continue),
     )?;
 
+    // Submit the startup cover before the loop can deliver its KMS event.
+    compositor.dispatch_at(read_lock_clocks())?;
+    if compositor.session_phase() != Some(Phase::Locking) {
+        return Err("lock acknowledged before dispatching the KMS completion".into());
+    }
+
     let mut startup_marked = false;
     let mut startup_released = false;
     let mut relocked = false;
     let mut disconnect_marked = false;
-    let mut invalid_replies = [
-        ("invalid-reply-1", "invalid-dispatched-1"),
-        ("invalid-reply-3", "invalid-dispatched-3"),
-    ]
-    .into_iter()
-    .peekable();
     loop {
         let now = read_lock_clocks();
         if !startup_released && control.join("bridge-awake").try_exists()? {
@@ -119,22 +118,8 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         {
             compositor.open_lock_attempt(now, ui);
         }
-        let mut invalid_dispatched = None;
-        if let Some((sent, dispatched)) = invalid_replies.peek().copied()
-            && control.join(sent).try_exists()?
-        {
-            invalid_dispatched = Some(dispatched);
-            let _ = invalid_replies.next();
-        }
         compositor.dispatch_at(now)?;
 
-        if let Some(marker) = invalid_dispatched {
-            if compositor.session_phase() != Some(Phase::Locked) || compositor.authd_fd().is_none()
-            {
-                return Err("invalid verdict changed the lock or disconnected its broker".into());
-            }
-            fs::write(control.join(marker), [])?;
-        }
         if !startup_marked && compositor.session_phase() == Some(Phase::Locked) {
             fs::write(control.join("startup-covered"), [])?;
             startup_marked = true;
@@ -171,35 +156,16 @@ fn run_broker(control: &Path) -> Result<(), Box<dyn Error>> {
             attempt: challenge.attempt,
             outcome: Outcome::Granted,
         };
-        match number {
-            1 => {
-                let next_attempt = current
-                    .attempt
-                    .0
-                    .checked_add(1)
-                    .ok_or("attempt exhausted")?;
-                send_verdict(
-                    &mut output,
-                    Verdict {
-                        attempt: Attempt(next_attempt),
-                        ..current
-                    },
-                )?;
-            }
-            3 => {
-                let replay = previous_grant.ok_or("no earlier grant to replay")?;
-                send_verdict(&mut output, replay)?;
-            }
-            _ => {
-                send_verdict(&mut output, current)?;
-                previous_grant = Some(current);
-            }
-        }
-        if matches!(number, 1 | 3) {
-            // Wait until the compositor dispatched the invalid reply before
-            // sending the current denial, so it reads one reply at a time.
-            fs::write(control.join(format!("invalid-reply-{number}")), [])?;
-            wait_for_marker(&control.join(format!("deny-{number}")))?;
+        let stale = match number {
+            1 => Some(Verdict {
+                attempt: Attempt(current.attempt.0.wrapping_add(1)),
+                ..current
+            }),
+            3 => Some(previous_grant.ok_or("no earlier grant to replay")?),
+            _ => None,
+        };
+        if let Some(stale) = stale {
+            send_verdict(&mut output, stale)?;
             send_verdict(
                 &mut output,
                 Verdict {
@@ -207,6 +173,9 @@ fn run_broker(control: &Path) -> Result<(), Box<dyn Error>> {
                     ..current
                 },
             )?;
+        } else {
+            send_verdict(&mut output, current)?;
+            previous_grant = Some(current);
         }
     }
 

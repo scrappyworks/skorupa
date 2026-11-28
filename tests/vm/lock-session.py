@@ -1,5 +1,7 @@
 """REQ-LOCK-002/003/014/019 and REQ-AUTH-001/002/003/017 on the guest KMS seat."""
 
+from datetime import timedelta
+
 from PIL import Image
 
 machine.start()
@@ -11,6 +13,11 @@ user = f"runuser -u alice -- env XDG_RUNTIME_DIR={runtime}"
 
 def wait_marker(name: str) -> None:
     machine.wait_for_file(f"{control}/{name}")
+
+
+def wait_challenge(number: int) -> None:
+    # A fresh challenge after denial must arrive before the 30 s attempt expires.
+    machine.wait_for_file(f"{control}/challenge-{number}", timeout=timedelta(seconds=10))
 
 
 def signal(name: str) -> None:
@@ -54,12 +61,9 @@ with subtest("startup holds input and presents only the cover"):
 
 with subtest("stale grant and current denial keep startup locked"):
     signal("bridge-awake")
-    wait_marker("challenge-1")
+    wait_challenge(1)
     signal("answer-1")
-    wait_marker("invalid-dispatched-1")
-    signal("deny-1")
-    # Only a current denial can retire the first attempt and permit another one.
-    wait_marker("challenge-2")
+    wait_challenge(2)
     verify_frame("startup-denied", covered=True)
     signal("answer-2")
     verify_frame("startup-unlocked", covered=False)
@@ -70,7 +74,7 @@ with subtest("stale grant and current denial keep startup locked"):
 
 with subtest("relocking fences a mapped client and a new surface"):
     signal("lock")
-    wait_marker("challenge-3")
+    wait_challenge(3)
     verify_frame("relocked", covered=True)
     start_client(2)
     verify_frame("relocked-after-client-commit", covered=True)
@@ -78,9 +82,7 @@ with subtest("relocking fences a mapped client and a new surface"):
 
 with subtest("replayed verdict stays locked and a current verdict restores focus"):
     signal("answer-3")
-    wait_marker("invalid-dispatched-3")
-    signal("deny-3")
-    wait_marker("challenge-4")
+    wait_challenge(4)
     verify_frame("replay-refused", covered=True)
     signal("answer-4")
     verify_frame("unlocked-again", covered=False)

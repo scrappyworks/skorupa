@@ -202,7 +202,6 @@ impl Challenge {
 
 fn read_session(reader: &mut Reader<'_>, too_short: DecodeError) -> Result<SessionId, DecodeError> {
     let len = usize::from(reader.u8().ok_or(too_short)?);
-    // Check the declared length before reading any byte of the identifier.
     if len > SessionId::MAX_LEN {
         return Err(DecodeError::InvalidSession(SessionIdError::TooLong { len }));
     }

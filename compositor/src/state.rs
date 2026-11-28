@@ -562,18 +562,19 @@ mod tests {
 
     #[test]
     fn req_lock_003_clears_held_keys_and_skips_keys_while_fenced() -> Result<(), Box<dyn Error>> {
+        const XKB_LEFT_SHIFT: u32 = 50;
+        const XKB_LEFT_ALT: u32 = 64;
         let display = Display::<State>::new()?;
         let mut state = State::new(&display.handle(), Config::default())?;
         let keyboard = state.seat.get_keyboard().ok_or("missing keyboard")?;
         let now = Duration::from_secs(1);
-        // XKB's keycode for left shift.
-        state.key(50, true, now);
+        state.key(XKB_LEFT_SHIFT, true, now);
         assert!(keyboard.modifier_state().shift);
 
         state.set_session_visible(false);
         assert!(keyboard.pressed_keys().is_empty());
-        state.key(50, false, now);
-        state.key(64, true, now);
+        state.key(XKB_LEFT_SHIFT, false, now);
+        state.key(XKB_LEFT_ALT, true, now);
 
         state.set_session_visible(true);
         assert!(keyboard.pressed_keys().is_empty());

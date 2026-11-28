@@ -311,7 +311,7 @@ impl State {
         };
         match backend.complete() {
             DrmFlip::Presented(content) => {
-                // REQ-LOCK-002: actual KMS completion, before the pacer may throttle it.
+                // REQ-LOCK-002 uses KMS completion even when the pacer delays client feedback.
                 self.lock_event(LockEvent::FramePresented(content));
                 self.pace(
                     now,

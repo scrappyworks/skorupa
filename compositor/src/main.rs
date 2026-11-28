@@ -1,8 +1,7 @@
 //! `skorupa-compositor`: defaults to headless. `--drm` opens the active seat.
 //!
 //! Listens on the next free `wayland-N` socket in `XDG_RUNTIME_DIR`, prints
-//! that name on standard output, and runs until it is killed. This file is
-//! the only place that reads the clock and waits.
+//! that name on standard output, and runs until it is killed.
 
 use std::convert::Infallible;
 use std::error::Error;

@@ -1,5 +1,3 @@
-//! Adapts the session lock reducer to the compositor and to the private authd channel.
-
 use std::io::{self, Error, ErrorKind, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -24,7 +22,7 @@ impl ClockSource for BootTime {
 
 impl NonNegativeClockSource for BootTime {}
 
-/// Reads the two clocks used to check for a resume before a lock event.
+/// Samples the clocks whose difference lets the reducer detect time spent asleep.
 #[must_use]
 pub fn read_lock_clocks() -> Clocks {
     Clocks {
@@ -48,8 +46,7 @@ impl SessionLock {
         now: Clocks,
         stream: UnixStream,
     ) -> io::Result<(Self, Vec<Effect>)> {
-        // Convert once at startup. The wire and reducer must compare exactly
-        // the same session, including the reducer's zero padding.
+        // Reject nonzero padding so the wire ID round-trips to the reducer's ID.
         let id = config.session.0;
         let end = id.iter().position(|&byte| byte == 0).unwrap_or(id.len());
         let (name, padding) = id.split_at(end);
@@ -257,8 +254,7 @@ impl Authd {
         let len = Message::Challenge(challenge)
             .encode(&mut buffer)
             .map_err(Error::other)?;
-        // One challenge can be outstanding. A short or blocked write retires
-        // the channel instead of leaving a partial message or a write queue.
+        // Retire the channel on a short or blocked write to bound the queue.
         if stream.write(&buffer[..len])? != len {
             return Err(Error::new(
                 ErrorKind::WriteZero,
@@ -269,11 +265,13 @@ impl Authd {
     }
 
     fn receive(&mut self) -> io::Result<Option<Verdict>> {
-        // At most two reads: one for a missing prefix and one for a body.
-        for _ in 0..2 {
+        // A peer that fragments a frame gets at most two reads per dispatch.
+        let mut reads_left = 2;
+        loop {
             match decode(&self.buffer[..self.received]) {
                 Ok((message, _)) => return self.finish(message).map(Some),
-                Err(DecodeError::Truncated { needed, .. }) => {
+                Err(DecodeError::Truncated { needed, .. }) if reads_left > 0 => {
+                    reads_left -= 1;
                     match self.stream.read(&mut self.buffer[self.received..needed]) {
                         Ok(0) => return Err(authd_disconnected()),
                         Ok(read) => self.received += read,
@@ -281,14 +279,9 @@ impl Authd {
                         Err(err) => return Err(err),
                     }
                 }
+                Err(DecodeError::Truncated { .. }) => return Ok(None),
                 Err(err) => return Err(Error::new(ErrorKind::InvalidData, err)),
             }
-        }
-
-        match decode(&self.buffer[..self.received]) {
-            Ok((message, _)) => self.finish(message).map(Some),
-            Err(DecodeError::Truncated { .. }) => Ok(None),
-            Err(err) => Err(Error::new(ErrorKind::InvalidData, err)),
         }
     }
 
@@ -299,8 +292,8 @@ impl Authd {
                 "authd sent the wrong message",
             ));
         };
-        // A timed-out attempt's late reply may precede a current reply. Keep
-        // those frames separate and check for a half-close even behind them.
+        // Queued verdicts can hide a half-close from a read. Check hangup
+        // before the reducer can apply any verdict from a closed broker.
         let mut status = PollFd::new(&self.stream, PollFlags::RDHUP);
         poll(
             std::slice::from_mut(&mut status),

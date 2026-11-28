@@ -255,9 +255,7 @@ impl Drm {
     }
 
     pub(crate) fn ready_to_render(&self) -> bool {
-        // Permit one kernel submission at a time, including after a timeout.
-        // A late event must retire the old submission before it can be
-        // confused with the completion of a later protected frame.
+        // Leave timed-out flips in flight so a late completion keeps its original tag.
         self.active && self.pending_flip.is_none()
     }
 
