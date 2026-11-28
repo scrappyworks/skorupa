@@ -22,7 +22,7 @@ use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier};
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu};
-use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::output::{Mode, Output};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::drm::control::{Device, ModeTypeFlags, connector, crtc};
 use smithay::reexports::input::Libinput;
@@ -239,22 +239,17 @@ impl Drm {
         let (connector, crtc, mode) = select_connector(&drm)?;
         let wl_mode = Mode::from(mode);
         let (width, height) = connector.size().unwrap_or_default();
-        let output = Output::new(
+        let output = crate::state::configured_output(
             format!(
                 "{}-{}",
                 connector.interface().as_str(),
                 connector.interface_id()
             ),
-            PhysicalProperties {
-                size: (i32::try_from(width)?, i32::try_from(height)?).into(),
-                subpixel: Subpixel::Unknown,
-                make: "Skorupa".into(),
-                model: "DRM".into(),
-                serial_number: String::new(),
-            },
+            wl_mode,
+            (i32::try_from(width)?, i32::try_from(height)?),
+            "DRM",
+            "",
         );
-        output.set_preferred(wl_mode);
-        output.change_current_state(Some(wl_mode), None, None, Some((0, 0).into()));
         let config = Config {
             output_size: (wl_mode.size.w, wl_mode.size.h),
             refresh_mhz: wl_mode.refresh,
