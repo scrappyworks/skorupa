@@ -66,6 +66,9 @@ smithay = { git = "https://github.com/Smithay/smithay", rev = "46643d204d61eef18
 tracing = { version = "0.1.37", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+# Construct kernel mode records for the DRM adapter tests without opening a device.
+# This is the same ABI crate the pinned drm library already builds.
+drm-ffi = "0.9"
 # The test clients: real Wayland clients that talk to the compositor over a
 # socket pair inside the test process. Only wayland-client is a new crate;
 # rustix (memfd for wl_shm) and wayland-protocols are already built for
