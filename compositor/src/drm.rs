@@ -490,6 +490,15 @@ impl Drm {
     }
 }
 
+// libinput reports the post-event count for this key across the seat.
+fn seat_key_transition(state: KeyState, count: u32) -> Option<bool> {
+    match (state, count) {
+        (KeyState::Pressed, 1) => Some(true),
+        (KeyState::Released, 0) => Some(false),
+        _ => None,
+    }
+}
+
 impl Devices {
     fn new(
         seat_session: LibSeatSession,
@@ -525,12 +534,10 @@ impl Devices {
         handle.insert_source(
             LibinputInputBackend::new(input.clone()),
             move |event, (), compositor| {
-                if let InputEvent::Keyboard { event } = event {
-                    compositor.key_at(
-                        event.key_code().raw(),
-                        event.state() == KeyState::Pressed,
-                        read_lock_clocks(),
-                    );
+                if let InputEvent::Keyboard { event } = event
+                    && let Some(pressed) = seat_key_transition(event.state(), event.count())
+                {
+                    compositor.key_at(event.key_code().raw(), pressed, read_lock_clocks());
                 }
             },
         )?;
