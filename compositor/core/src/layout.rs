@@ -112,6 +112,11 @@ pub enum Event {
         valid_token: bool,
     },
     Unmap(WindowId),
+    /// A mapped toplevel changed its application id.
+    AppIdChanged {
+        window: WindowId,
+        app_id: Option<String>,
+    },
     /// A client asked for activation of a mapped window.
     Activate {
         window: WindowId,
@@ -261,26 +266,39 @@ fn int(count: usize) -> i32 {
 /// keyboard and the shell, in that order, after any close request.
 #[must_use]
 pub fn step(mut state: Layout, event: Event) -> (Layout, Vec<Effect>) {
-    let before = state.told();
-    let mut effects = Vec::new();
-    state.apply(event, &mut effects);
-    state.settle();
-    let after = state.told();
-    for (window, configure) in &after.0 {
-        if before.0.get(window) != Some(configure) {
-            effects.push(Effect::Configure(*window, *configure));
-        }
-    }
-    if before.1 != after.1 {
-        effects.push(Effect::Focus(after.1));
-    }
-    if before.2 != after.2 {
-        effects.push(Effect::Workspaces);
-    }
+    let effects = state.handle(event);
     (state, effects)
 }
 
 impl Layout {
+    /// Applies the same transition as [`step`] in place. An adapter that
+    /// owns the layout can retain its allocations between input events.
+    #[must_use]
+    pub fn handle(&mut self, event: Event) -> Vec<Effect> {
+        // App IDs affect switcher membership only. There are no configure,
+        // keyboard or workspace changes to diff for a metadata update.
+        let before = (!matches!(event, Event::AppIdChanged { .. })).then(|| self.told());
+        let mut effects = Vec::new();
+        self.apply(event, &mut effects);
+        let Some(before) = before else {
+            return effects;
+        };
+        self.settle();
+        let after = self.told();
+        for (window, configure) in &after.0 {
+            if before.0.get(window) != Some(configure) {
+                effects.push(Effect::Configure(*window, *configure));
+            }
+        }
+        if before.1 != after.1 {
+            effects.push(Effect::Focus(after.1));
+        }
+        if before.2 != after.2 {
+            effects.push(Effect::Workspaces);
+        }
+        effects
+    }
+
     #[must_use]
     pub fn new(output: Size, reserved_top: i32) -> Self {
         let mut layout = Self {
@@ -588,6 +606,20 @@ impl Layout {
                 self.map(window, app_id, parent, heir, valid_token, effects);
             }
             Event::Unmap(window) => self.unmap(window),
+            Event::AppIdChanged { window, app_id } => {
+                let app_id = app_id.filter(|id| id.len() <= MAX_APP_ID_LEN);
+                // Keep the open filter when its selected window leaves the group.
+                if self
+                    .switcher
+                    .as_ref()
+                    .is_some_and(|switcher| switcher.app_id.is_some() && switcher.app_id != app_id)
+                {
+                    self.remove_candidate(window);
+                }
+                if let Some(state) = self.windows.get_mut(&window) {
+                    state.app_id = app_id;
+                }
+            }
             Event::Activate {
                 window,
                 valid_token,
@@ -709,10 +741,7 @@ impl Layout {
         }
     }
 
-    fn unmap(&mut self, window: WindowId) {
-        let Some(home) = self.home(window) else {
-            return;
-        };
+    fn remove_candidate(&mut self, window: WindowId) {
         if self
             .switcher
             .as_ref()
@@ -723,6 +752,13 @@ impl Layout {
             self.switcher
                 .take_if(|switcher| switcher.selected == window);
         }
+    }
+
+    fn unmap(&mut self, window: WindowId) {
+        let Some(home) = self.home(window) else {
+            return;
+        };
+        self.remove_candidate(window);
         let Some(gone) = self.windows.remove(&window) else {
             return;
         };

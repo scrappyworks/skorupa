@@ -641,6 +641,25 @@ fn req_ux_003_alt_grave_cycles_windows_of_the_same_app() {
 }
 
 #[test]
+fn req_ux_003_group_tracks_app_id_changes_on_mapped_windows() {
+    let layout = run(start(), [app(1, "a"), app(2, "b"), app(3, "a"), ALT_GRAVE]);
+    assert_eq!(selected(&layout), Some(1));
+    let changed = |id, name: &str| Event::AppIdChanged {
+        window: w(id),
+        app_id: Some(name.to_owned()),
+    };
+    let (layout, effects) = step(layout, changed(2, "a"));
+    assert_eq!(effects, []);
+    assert_eq!(candidates(&layout), [3, 2, 1]);
+    let layout = run(layout, [changed(1, "b")]);
+    assert_eq!(candidates(&layout), [3, 2]);
+    assert_eq!(selected(&layout), Some(3));
+    let layout = run(layout, [changed(3, "b"), changed(2, "b")]);
+    assert_eq!(layout.switcher(), None);
+    assert_eq!(layout.focus(), Some(w(3)));
+}
+
+#[test]
 fn req_ux_003_single_match_stays_and_a_missing_app_id_is_no_filter() {
     let layout = run(start(), [app(1, "term"), app(2, "web"), app(3, "solo")]);
     let layout = run(layout, [ALT_GRAVE, ALT_GRAVE, ALT_GRAVE]);
