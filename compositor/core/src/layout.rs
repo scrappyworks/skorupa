@@ -26,9 +26,8 @@
 //!   other window.
 //! - While nothing is focused, that is on an empty active workspace, a new
 //!   independent window opens on that workspace and gets the focus, so that
-//!   a session can start its applications. This is the proposed answer to
-//!   open decision O-20, awaiting the owner. With any window on screen, a
-//!   new independent window opens a workspace directly below.
+//!   a session can start its applications. With any window on screen, a new
+//!   independent window opens a workspace directly below.
 //!
 //! # Empty workspaces
 //!
@@ -698,7 +697,7 @@ impl Layout {
             home
         } else if self.workspaces[self.active].tiles.is_empty() {
             // Nothing is focused, so there is no focus to steal: `settle`
-            // gives it to the only window here (proposed for O-20).
+            // gives it to the only window here.
             self.workspaces[self.active].tiles.push(window);
             self.active
         } else {
