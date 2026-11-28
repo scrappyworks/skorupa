@@ -72,6 +72,7 @@ pub struct Data {
     presentation: Option<WpPresentation>,
     /// Current mode of the output: width, height, refresh in mHz.
     pub mode: Option<(i32, i32, i32)>,
+    pub preferred_mode: Option<(i32, i32, i32)>,
     pub clock_id: Option<u32>,
     pending_configure: Option<Configure>,
     pub configures: Vec<Configure>,
@@ -299,13 +300,19 @@ impl Dispatch<WlOutput, ()> for Data {
         _: &QueueHandle<Self>,
     ) {
         if let wl_output::Event::Mode {
+            flags: WEnum::Value(flags),
             width,
             height,
             refresh,
-            ..
         } = event
         {
-            state.mode = Some((width, height, refresh));
+            let mode = (width, height, refresh);
+            if flags.contains(wl_output::Mode::Current) {
+                state.mode = Some(mode);
+            }
+            if flags.contains(wl_output::Mode::Preferred) {
+                state.preferred_mode = Some(mode);
+            }
         }
     }
 }

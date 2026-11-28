@@ -25,6 +25,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     client.roundtrip()?;
     let window = client.create_window();
     client.roundtrip()?;
+    let mode = client.data.mode.ok_or("no current output mode")?;
+    if client.data.preferred_mode != Some(mode) {
+        return Err("preferred output mode differs from the current mode".into());
+    }
     let (width, height) = client.data.configures.last().ok_or("no configure")?.size;
     if !(160..=4096).contains(&width) || !(160..=4096).contains(&height) {
         return Err("unexpected VM window dimensions".into());
