@@ -129,7 +129,25 @@ impl Compositor {
         self.state.open_lock_attempt(ui);
     }
 
-    /// The event loop can poll this descriptor for a verdict or a disconnect.
+    /// Attaches the private endpoint for a restarted authentication broker.
+    ///
+    /// The trusted launcher must give its peer exclusively to the new broker
+    /// by inheritance. The existing lock and its attempt counter stay in force.
+    ///
+    /// # Errors
+    /// Returns `NotConnected` before session lock setup, `AlreadyExists` while
+    /// the old broker is attached, or the error from configuring the socket.
+    pub fn reattach_authd(&mut self, stream: UnixStream) -> io::Result<()> {
+        self.state
+            .session_lock
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "session lock is absent"))?
+            .attach_authd(stream)
+    }
+
+    /// Poll this descriptor with level-triggered readiness for verdicts and
+    /// disconnects. Each dispatch handles at most one verdict. Register the
+    /// new descriptor after [`Self::reattach_authd`].
     /// [`Self::dispatch`] owns reads from it.
     #[must_use]
     pub fn authd_fd(&self) -> Option<BorrowedFd<'_>> {

@@ -710,7 +710,8 @@ impl State {
             Event::Verdict { binding, outcome } => self.judge(binding, outcome, effects),
             // REQ-AUTH-017: nothing the old connection issued counts.
             Event::AuthdDisconnected => {
-                if matches!(self.ui, Ui::Checking { .. }) {
+                // A starting UI may already hold the old broker's credential channel.
+                if self.ui != Ui::Stopped {
                     self.fail_ui(true, effects);
                 }
             }
