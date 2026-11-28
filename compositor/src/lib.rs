@@ -6,6 +6,7 @@
 //! stepped with the time as an argument, by `main` from the monotonic clock
 //! and by the tests from a simulated one.
 
+mod drm;
 mod frame;
 pub mod headless;
 pub mod layout;
@@ -19,10 +20,11 @@ use std::time::Duration;
 
 pub use skorupa_compositor_core as core;
 pub use skorupa_protocol as protocol;
+use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::wayland_server::Display;
 
 pub use crate::state::Config;
-use crate::state::State;
+use crate::state::{Backend, State};
 
 pub struct Compositor {
     display: Display<State>,
@@ -36,6 +38,19 @@ impl Compositor {
     pub fn new(config: Config) -> Result<Self, Box<dyn Error>> {
         let display = Display::new()?;
         let state = State::new(&display.handle(), config)?;
+        Ok(Self { display, state })
+    }
+
+    /// Opens one atomic KMS output and registers the logind seat devices.
+    ///
+    /// # Errors
+    /// When the seat, output, renderer or device events cannot be set up.
+    pub fn new_drm(handle: &LoopHandle<'_, Self>) -> Result<Self, Box<dyn Error>> {
+        let (backend, devices, output, config) = drm::Drm::open()?;
+        let display = Display::new()?;
+        let backend = Backend::Drm(Box::new(backend));
+        let state = State::with_backend(&display.handle(), config, output, backend)?;
+        devices.register(handle)?;
         Ok(Self { display, state })
     }
 
@@ -93,6 +108,9 @@ impl Compositor {
     ///
     /// When the image cannot be read back.
     pub fn pixels(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
-        self.state.backend.pixels()
+        match &mut self.state.backend {
+            Backend::Headless(backend) => backend.pixels(),
+            Backend::Drm(_) => Err("pixels are available only with the headless backend".into()),
+        }
     }
 }

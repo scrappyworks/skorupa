@@ -9,13 +9,12 @@ use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::RenderElementStates;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::pixman::PixmanRenderer;
-use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen};
+use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
 use smithay::output::Output;
 use smithay::reexports::pixman::Image;
 use smithay::utils::{Buffer, Physical, Rectangle, Size};
 
-/// Shown where no window is.
-const BACKGROUND: Color32F = Color32F::new(0.1, 0.1, 0.1, 1.0);
+use crate::frame::BACKGROUND;
 
 pub type Element = WaylandSurfaceRenderElement<PixmanRenderer>;
 

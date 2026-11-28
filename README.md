@@ -2,7 +2,8 @@
 
 A small, security-focused Wayland desktop for laptops with one screen.
 
-> **Status:** design phase. Nothing here runs yet.
+> **Status:** the headless compositor runs ordinary Wayland clients. See
+> [the virtual machine checks](docs/vm.md) for the graphical test session.
 
 ## Goals
 

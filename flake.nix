@@ -150,15 +150,19 @@
         );
 
       main = workspace "main" ".";
-      # Smithay links two C libraries: Pixman for the software renderer and
-      # libxkbcommon for the keymap. Neither crate asks pkg-config; the
-      # linker finds them through buildInputs.
-      compositorLibs = [
-        pkgs.pixman
-        pkgs.libxkbcommon
+      compositorLibs = with pkgs; [
+        libdrm
+        libgbm
+        libglvnd
+        libinput
+        libxkbcommon
+        pixman
+        seatd
+        systemd
       ];
       compositor = workspace "compositor" "compositor" // {
         buildInputs = compositorLibs;
+        nativeBuildInputs = [ pkgs.pkg-config ];
       };
       fuzz = workspace "fuzz" "fuzz";
 
@@ -199,6 +203,16 @@
           done
           touch $out
         '';
+
+        vm-logind = import ./tests/vm/logind.nix { inherit pkgs; };
+
+        vm-session = import ./tests/vm/session.nix {
+          inherit pkgs;
+          compositor = package (compositor // {
+            CARGO_PROFILE = "dev";
+            cargoBuildExtraArgs = "--bin skorupa-compositor --example skorupa-vm-client";
+          });
+        };
 
         main = lintAndTest main;
         compositor = lintAndTest compositor;

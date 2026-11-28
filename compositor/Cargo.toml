@@ -47,13 +47,17 @@ publish.workspace = true
 [dependencies]
 skorupa-compositor-core.workspace = true
 skorupa-protocol.workspace = true
-# Pinned to a full upstream commit, unpatched (REQ-DEP-001); an update is its
-# own change (REQ-DEP-008). Only what the headless compositor needs: the
-# Wayland protocol handlers, the surface-tree helpers and the Pixman software
-# renderer. calloop comes in through Smithay without its `signals` feature,
-# which would pull the banned `nix` crate.
+# Pinned to a full upstream commit, unpatched (REQ-DEP-001). X11, XWayland
+# and calloop signals are kept out of the compositor.
 smithay = { git = "https://github.com/Smithay/smithay", rev = "46643d204d61eef18bfb17faa814559af70504ed", default-features = false, features = [
+  "backend_egl",
+  "backend_gbm",
+  "backend_libinput",
+  "backend_session_libseat",
+  "backend_udev",
   "desktop",
+  "renderer_gl",
+  "renderer_multi",
   "renderer_pixman",
   "wayland_frontend",
 ] }
@@ -74,3 +78,7 @@ workspace = true
 
 [profile.release]
 overflow-checks = true
+
+[[example]]
+name = "skorupa-vm-client"
+path = "tests/clients/vm.rs"

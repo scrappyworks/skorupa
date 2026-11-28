@@ -100,7 +100,10 @@ pub struct Client {
 
 impl Client {
     pub fn new(stream: UnixStream) -> Self {
-        let connection = Connection::from_socket(stream).unwrap();
+        Self::from_connection(Connection::from_socket(stream).unwrap())
+    }
+
+    pub fn from_connection(connection: Connection) -> Self {
         let queue = connection.new_event_queue();
         let qh = queue.handle();
         connection.display().get_registry(&qh, ());
@@ -110,6 +113,16 @@ impl Client {
             qh,
             data: Data::default(),
         }
+    }
+
+    #[allow(dead_code)] // The VM client talks to a separate process.
+    pub fn roundtrip(&mut self) -> Result<usize, wayland_client::DispatchError> {
+        self.queue.roundtrip(&mut self.data)
+    }
+
+    #[allow(dead_code)] // The VM client talks to a separate process.
+    pub fn wait(&mut self) -> Result<usize, wayland_client::DispatchError> {
+        self.queue.blocking_dispatch(&mut self.data)
     }
 
     pub fn flush(&self) {
@@ -176,9 +189,25 @@ impl Client {
     /// A shared-memory buffer filled with one color. `format` says whether
     /// the top byte of `pixel` is alpha or padding.
     pub fn buffer(&mut self, width: i32, height: i32, format: Format, pixel: u32) -> WlBuffer {
+        self.buffer_with(width, height, format, |_, _| pixel)
+    }
+
+    pub fn buffer_with(
+        &mut self,
+        width: i32,
+        height: i32,
+        format: Format,
+        pixel: impl Fn(i32, i32) -> u32,
+    ) -> WlBuffer {
         let count = usize::try_from(width * height).unwrap();
+        let mut pixels = Vec::with_capacity(count * 4);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.extend(pixel(x, y).to_ne_bytes());
+            }
+        }
         let mut file = File::from(memfd_create("skorupa-test", MemfdFlags::CLOEXEC).unwrap());
-        file.write_all(&pixel.to_ne_bytes().repeat(count)).unwrap();
+        file.write_all(&pixels).unwrap();
         let shm = self.data.shm.as_ref().unwrap();
         let pool = shm.create_pool(file.as_fd(), width * height * 4, &self.qh, ());
         let buffer = pool.create_buffer(0, width, height, width * 4, format, &self.qh, ());
