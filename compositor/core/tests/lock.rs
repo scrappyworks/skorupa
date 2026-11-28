@@ -78,6 +78,16 @@ impl Rig {
         effects
     }
 
+    fn bridge_report(&mut self) -> Vec<Effect> {
+        self.send(self.bridge_report_event())
+    }
+
+    fn bridge_report_event(&self) -> Event {
+        self.state
+            .hold_token()
+            .map_or(Event::Tick, |token| Event::SleepOver { token })
+    }
+
     /// The machine sleeps: only the boot-time clock moves.
     fn sleep(&mut self) {
         self.now.boottime += NAP;
@@ -92,7 +102,7 @@ impl Rig {
     fn locked() -> Self {
         let mut rig = Self::start();
         rig.present(Content::Protected);
-        rig.send(Event::Resumed);
+        rig.bridge_report();
         assert_eq!(rig.state.phase(), Phase::Locked);
         rig
     }
@@ -155,7 +165,8 @@ fn req_lock_013_new_instance_starts_covered() {
         [
             Effect::RouteInput(InputMode::Nobody),
             Effect::ShowFallback,
-            Effect::ScheduleFrame
+            Effect::ScheduleFrame,
+            Effect::OfferSleepHold(state.hold_token().unwrap())
         ]
     );
     let view = state.view();
@@ -237,7 +248,7 @@ fn req_lock_004_every_source_locks_and_nothing_cancels() {
             Event::LogindUnlock,
             Event::LockRequested,
             Event::InhibitorTimedOut,
-            Event::Resumed,
+            Event::BridgeConnected,
             Event::OutputOn,
             Event::AuthdDisconnected,
             Event::UiExited { ui: rig.ui },
@@ -274,7 +285,9 @@ fn req_lock_010_output_off_acknowledges_without_a_flip() {
     assert!(acknowledged(&rig.send(Event::OutputOff)));
     assert_eq!(rig.state.phase(), Phase::Locked);
     assert_eq!(rig.send(Event::OutputOn), [Effect::ScheduleFrame]);
-    assert_eq!(rig.state.phase(), Phase::Locked);
+    assert_eq!(rig.state.phase(), Phase::Locking);
+    assert_eq!(rig.send(Event::AttemptOpened { ui: rig.ui }), []);
+    assert!(acknowledged(&rig.present(Content::Protected)));
 }
 
 /// REQ-LOCK-010: with the output already off, the request is acknowledged in
@@ -414,24 +427,34 @@ fn req_lock_017_logind_unlock_is_ignored_in_every_phase() {
 fn req_lock_024_sleep_release_echoes_the_nonce_and_waits_for_locked() {
     let mut rig = Rig::unlocked();
     let requested = rig.send(Event::PrepareForSleep { nonce: 41 });
-    assert!(!requested.contains(&Effect::ReleaseSleepInhibitor { nonce: 41 }));
+    let token = rig.state.hold_token().unwrap();
+    assert!(
+        !requested
+            .iter()
+            .any(|effect| matches!(effect, Effect::ReleaseSleepInhibitor { .. }))
+    );
     let presented = rig.present(Content::Protected);
     let epoch = rig.state.view().epoch;
     assert_eq!(
         presented,
         [
             Effect::LockAcknowledged { epoch },
-            Effect::ReleaseSleepInhibitor { nonce: 41 }
+            Effect::ReleaseSleepInhibitor { nonce: 41, token }
         ]
     );
     assert_eq!(rig.send(Event::PrepareForSleep { nonce: 41 }), []);
+    let effects = rig.send(Event::PrepareForSleep { nonce: 42 });
+    let token = rig.state.hold_token().unwrap();
     assert_eq!(
-        rig.send(Event::PrepareForSleep { nonce: 42 }),
-        [Effect::ReleaseSleepInhibitor { nonce: 42 }]
+        effects,
+        [
+            Effect::OfferSleepHold(token),
+            Effect::ReleaseSleepInhibitor { nonce: 42, token }
+        ]
     );
 }
 
-/// REQ-LOCK-018, open decision O-29: after the release, the attempt is closed
+/// REQ-LOCK-018 and REQ-LOCK-026: after the release, the attempt is closed
 /// and a valid verdict is dropped until the sleep is over.
 #[test]
 fn req_lock_018_sleep_hold_closes_the_attempt_and_drops_the_verdict() {
@@ -439,26 +462,28 @@ fn req_lock_018_sleep_hold_closes_the_attempt_and_drops_the_verdict() {
     let binding = rig.open_attempt();
     let ui = rig.ui;
     let effects = rig.send(Event::PrepareForSleep { nonce: 5 });
+    let token = rig.state.hold_token().unwrap();
     assert_eq!(
         effects,
         [
-            Effect::ReleaseSleepInhibitor { nonce: 5 },
             Effect::ShowFallback,
             Effect::RouteInput(InputMode::Nobody),
-            Effect::StopUi { ui }
+            Effect::StopUi { ui },
+            Effect::OfferSleepHold(token),
+            Effect::ReleaseSleepInhibitor { nonce: 5, token }
         ]
     );
     assert_eq!(rig.verdict(binding, Outcome::Granted), []);
     assert_eq!(rig.state.phase(), Phase::Locked);
     assert_eq!(rig.send(Event::UiConnected { ui }), []);
     // The bridge reports that the sleep is over: a new UI may start.
-    assert!(restart_delay(&rig.send(Event::Resumed)).is_some());
+    assert!(restart_delay(&rig.bridge_report()).is_some());
     let binding = rig.open_attempt();
     rig.verdict(binding, Outcome::Granted);
     assert_eq!(rig.state.phase(), Phase::Unlocked);
 }
 
-/// REQ-LOCK-018, open decision O-29: a new instance cannot know whether its
+/// REQ-LOCK-018 and REQ-LOCK-026: a new instance cannot know whether its
 /// predecessor released a sleep, so it starts in the hold. The clock jump of
 /// the resume ends the hold as well as the bridge's report does.
 #[test]
@@ -469,7 +494,9 @@ fn req_lock_018_sleep_hold_survives_a_restart_and_ends_on_resume() {
     assert_eq!(rig.send(Event::UiConnected { ui: 1 }), []);
     assert_eq!(rig.send(Event::AttemptOpened { ui: 1 }), []);
     rig.sleep();
-    assert!(restart_delay(&rig.send(Event::Tick)).is_some());
+    assert!(restart_delay(&rig.send(Event::Tick)).is_none());
+    assert_eq!(rig.state.phase(), Phase::Locking);
+    assert!(restart_delay(&rig.present(Content::Protected)).is_some());
     let binding = rig.open_attempt();
     rig.verdict(binding, Outcome::Granted);
     assert_eq!(rig.state.phase(), Phase::Unlocked);
@@ -481,7 +508,7 @@ fn req_lock_025_verdict_as_first_event_after_a_jump_is_rejected() {
     let binding = rig.open_attempt();
     rig.sleep();
     let effects = rig.verdict(binding, Outcome::Granted);
-    assert_eq!(rig.state.phase(), Phase::Locked);
+    assert_eq!(rig.state.phase(), Phase::Locking);
     assert!(!effects.iter().any(|e| matches!(e, Effect::Unlock { .. })));
 }
 
@@ -539,7 +566,7 @@ fn req_auth_001_verdict_without_an_open_attempt_is_rejected() {
     assert_eq!(rig.verdict(guess, Outcome::Granted), []);
     rig.present(Content::Protected);
     assert_eq!(rig.verdict(guess, Outcome::Granted), []);
-    rig.send(Event::Resumed);
+    rig.bridge_report();
     rig.send(Event::UiConnected { ui: rig.ui });
     assert_eq!(rig.verdict(guess, Outcome::Granted), []);
     // The attempt counter before any attempt is not an open attempt either.
@@ -588,11 +615,12 @@ fn req_auth_016_resume_voids_the_open_attempt() {
     rig.sleep();
     rig.send(Event::Tick);
     assert_eq!(rig.verdict(binding, Outcome::Granted), []);
-    // The bridge's report alone voids it too, should the jump go unseen.
+    assert_eq!(rig.state.phase(), Phase::Locking);
+    assert_eq!(rig.send(Event::AttemptOpened { ui: rig.ui }), []);
+    assert!(acknowledged(&rig.present(Content::Protected)));
     let binding = rig.open_attempt();
-    rig.send(Event::Resumed);
-    assert_eq!(rig.verdict(binding, Outcome::Granted), []);
-    assert_eq!(rig.state.phase(), Phase::Locked);
+    rig.verdict(binding, Outcome::Granted);
+    assert_eq!(rig.state.phase(), Phase::Unlocked);
 }
 
 #[test]
@@ -692,7 +720,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Event::Tick),
         3 => Just(Event::LockRequested),
         1 => (0..3u64).prop_map(|nonce| Event::PrepareForSleep { nonce }),
-        1 => Just(Event::Resumed),
+        1 => Just(Event::BridgeConnected),
         1 => Just(Event::InhibitorTimedOut),
         1 => Just(Event::LogindUnlock),
         1 => Just(Event::RenderFailed),
@@ -779,7 +807,8 @@ impl Walk {
                     Event::FramePresented(Content::Protected)
                 }
                 (Phase::Locking, _) => Event::FrameSubmitted(Content::Protected),
-                (Phase::Locked, Ui::Stopped) => Event::Resumed,
+                (Phase::Locked, Ui::Stopped) if !self.output_on => Event::OutputOn,
+                (Phase::Locked, Ui::Stopped) => self.rig.bridge_report_event(),
                 (Phase::Locked, Ui::Starting) => Event::UiConnected { ui: ui(false) },
                 (Phase::Locked, Ui::Connected) => Event::AttemptOpened { ui: ui(false) },
                 (Phase::Locked, Ui::Checking) => Event::Verdict {
@@ -834,13 +863,17 @@ impl Walk {
 
         // What the inputs void, before the event itself is judged.
         let slept = self.watch.slept(now);
-        if slept || event == Event::Resumed {
+        let hold_ended =
+            matches!(event, Event::SleepOver { token } if before.hold_token() == Some(token));
+        if slept || hold_ended {
             self.held = false;
             self.nonces.clear();
+        }
+        if slept {
             self.flight = self.flight.map(|_| Content::Session);
         }
         let timed_out = self.answerable.is_some_and(|end| now.monotonic >= end);
-        let gone = matches!(event, Event::Resumed | Event::AuthdDisconnected)
+        let gone = matches!(event, Event::OutputOff | Event::AuthdDisconnected)
             || event == Event::UiExited { ui };
         if slept || timed_out || gone {
             self.answerable = None;
@@ -889,14 +922,21 @@ impl Walk {
     /// Property B: `Locked` is entered by an acknowledgement, and that has
     /// two causes only.
     fn check_acknowledgement(&mut self, taken: &Taken) -> Result<(), TestCaseError> {
-        let entered = taken.before.phase() != Phase::Locked && taken.after.phase() == Phase::Locked;
+        let reacknowledged = taken.slept && taken.event == Event::OutputOff;
+        let entered = (taken.before.phase() != Phase::Locked || reacknowledged)
+            && taken.after.phase() == Phase::Locked;
         prop_assert_eq!(entered, acknowledged(&taken.effects));
         let shown = taken.event == Event::FramePresented(Content::Protected)
             && self.flight == Some(Content::Protected);
         let dark = !self.output_on || taken.event == Event::OutputOff;
         match taken.event {
             Event::OutputOff => (self.output_on, self.flight) = (false, None),
-            Event::OutputOn => self.output_on = true,
+            Event::OutputOn => {
+                if !self.output_on && taken.before.phase() == Phase::Locked && !taken.slept {
+                    self.flight = None;
+                }
+                self.output_on = true;
+            }
             Event::FrameSubmitted(content) => {
                 let alone = self.flight.is_none();
                 self.flight = Some(if alone { content } else { Content::Session });
@@ -942,7 +982,14 @@ impl Walk {
                 }
                 // REQ-LOCK-024: released only while `Locked`, for a request
                 // of this wake period.
-                Effect::ReleaseSleepInhibitor { nonce } => {
+                Effect::OfferSleepHold(offered)
+                    if matches!(taken.event, Event::PrepareForSleep { .. }) =>
+                {
+                    prop_assert_eq!(taken.after.hold_token(), Some(offered));
+                    self.held = true;
+                    self.answerable = None;
+                }
+                Effect::ReleaseSleepInhibitor { nonce, .. } => {
                     let requested = taken.event == Event::PrepareForSleep { nonce };
                     prop_assert!(locked && (requested || self.nonces.contains(&nonce)));
                     self.held = true;
@@ -1019,4 +1066,23 @@ fn req_auth_001_generated_sequences_reach_the_interesting_states() {
         "{second_epochs} of 256 reached a second lock"
     );
     assert!(releases > 64, "{releases} of 256 released a sleep");
+}
+
+#[test]
+fn req_lock_026_stale_bridge_report_does_not_end_the_current_hold() {
+    let mut rig = Rig::start();
+    let old = rig.state.hold_token().unwrap();
+    rig.present(Content::Protected);
+    rig.bridge_report();
+    rig.send(Event::PrepareForSleep { nonce: 1 });
+    let current = rig.state.hold_token().unwrap();
+    assert_ne!(old, current);
+    assert_eq!(
+        rig.send(Event::BridgeConnected),
+        [Effect::OfferSleepHold(current)]
+    );
+    assert_eq!(rig.send(Event::SleepOver { token: old }), []);
+    assert_eq!(rig.state.hold_token(), Some(current));
+    assert!(restart_delay(&rig.bridge_report()).is_some());
+    assert_eq!(rig.state.hold_token(), None);
 }

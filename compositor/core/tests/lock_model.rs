@@ -35,10 +35,10 @@
 //! Where a replay differs from its trace:
 //!
 //! - The model starts unlocked. A compositor instance here starts covered and
-//!   in the sleep hold (open decision O-29), so a replay first walks the
+//!   in the sleep hold (REQ-LOCK-026), so a replay first walks the
 //!   plain path to an unlock, and its bindings start at epoch 2.
 //! - After `compRestart` the new instance is in the hold. The replay adds the
-//!   bridge's report (`Resumed`) before `compOpenAttempt`.
+//!   bridge's matched report (`SleepOver`) before `compOpenAttempt`.
 //! - Steps of `authd`, `pwcheck`, `lock/ui` and the bridge have no event in
 //!   these reducers. The replay carries the message they would send. Two
 //!   traces break a rule of another process (`cx_shared_ui_channel` in
@@ -172,11 +172,17 @@ impl World {
     fn unlocked() -> Self {
         let mut world = Self::start();
         world.present();
-        world.lock_event(lock::Event::Resumed);
+        world.bridge_report();
         let binding = world.reach_verdict();
         world.verdict(binding, Outcome::Granted);
         assert_eq!(world.lock.phase(), Phase::Unlocked);
         world
+    }
+
+    fn bridge_report(&mut self) {
+        if let Some(token) = self.lock.hold_token() {
+            self.lock_event(lock::Event::SleepOver { token });
+        }
     }
 
     fn phase(&self) -> Phase {
@@ -220,7 +226,7 @@ impl World {
                     self.seen.opened_this_wake = true;
                 }
                 lock::Effect::LockAcknowledged { .. } => self.seen.must_cover = true,
-                lock::Effect::ReleaseSleepInhibitor { nonce } => self.releases.push(nonce),
+                lock::Effect::ReleaseSleepInhibitor { nonce, .. } => self.releases.push(nonce),
                 lock::Effect::Unlock { .. } => {
                     self.seen.must_cover = false;
                     self.seen.must_relock = false;
@@ -569,13 +575,13 @@ fn req_lock_011_cx_unlock_on_render_error() {
 fn req_auth_015_cx_skip_instance_check() {
     let mut world = World::start();
     world.present();
-    world.lock_event(lock::Event::Resumed);
+    world.bridge_report();
     let old = world.reach_verdict();
     world.verdict(old, Outcome::Granted);
     assert_eq!(world.phase(), Phase::Unlocked);
     world.comp_restart();
     world.present();
-    world.lock_event(lock::Event::Resumed);
+    world.bridge_report();
     let new = world.comp_open_attempt().unwrap();
     assert_eq!((new.epoch, new.attempt), (old.epoch, old.attempt));
     assert_ne!(new.instance, old.instance);
@@ -679,6 +685,9 @@ fn req_auth_016_cx_keep_attempt_on_resume() {
     world.sleep(true);
     world.comp_see_jump();
     world.verdict(binding, Outcome::Granted);
+    assert_eq!(world.phase(), Phase::Locking);
+    assert_eq!(world.comp_open_attempt(), None);
+    world.present();
     assert_eq!(world.phase(), Phase::Locked);
 }
 
@@ -692,6 +701,7 @@ fn req_lock_024_cx_stale_ack() {
     assert_eq!(world.releases, [1]);
     world.sleep(true);
     world.comp_see_jump();
+    world.present();
     let binding = world.reach_verdict();
     world.verdict(binding, Outcome::Granted);
     assert_eq!(world.phase(), Phase::Unlocked);
@@ -807,7 +817,7 @@ fn req_grant_008_cx_stop_by_holder() {
     assert!(!world.comp_dispatch(&first));
 }
 
-/// REQ-LOCK-018, open decision O-29: `knownGapUnlockBetweenAckAndSuspendTest`
+/// REQ-LOCK-018 and REQ-LOCK-026: `knownGapUnlockBetweenAckAndSuspendTest`
 /// with the hold. The verdict that was in flight at the release is dropped,
 /// so the machine sleeps covered.
 #[test]
@@ -825,7 +835,7 @@ fn req_lock_018_sleep_hold_closes_gap() {
     assert_eq!(world.screen, Some(Content::Protected));
 }
 
-/// REQ-LOCK-018, open decision O-29: the compositor restarts between the
+/// REQ-LOCK-018 and REQ-LOCK-026: the compositor restarts between the
 /// release and the suspend. The new instance opens no attempt.
 #[test]
 fn req_lock_018_sleep_hold_survives_restart() {
@@ -886,7 +896,7 @@ fn action() -> impl Strategy<Value = Action> {
     ];
     let event = prop_oneof![
         3 => Just(lock::Event::LockRequested),
-        2 => Just(lock::Event::Resumed),
+        2 => Just(lock::Event::BridgeConnected),
         1 => (1..4u64).prop_map(|nonce| lock::Event::PrepareForSleep { nonce }),
         1 => Just(lock::Event::InhibitorTimedOut),
         1 => Just(lock::Event::LogindUnlock),
@@ -922,6 +932,7 @@ fn action() -> impl Strategy<Value = Action> {
 impl World {
     fn progress(&mut self) {
         match self.phase() {
+            Phase::Locking | Phase::Locked if !self.output_on => self.output_back(),
             Phase::Locking if self.flip.is_some() => {
                 self.comp_read_stale_flip();
                 self.kms_flip_done();
@@ -936,7 +947,7 @@ impl World {
                 }
                 // In the hold, or an attempt is open already: start over.
                 None => {
-                    self.lock_event(lock::Event::Resumed);
+                    self.bridge_report();
                 }
             },
             Phase::Unlocked => {

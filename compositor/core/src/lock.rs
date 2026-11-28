@@ -21,14 +21,12 @@
 //! `Unlocked` every frame is a lock frame. The adapter steps the reducer with
 //! fresh clocks before it draws.
 //!
-//! # Sleep hold (open decision O-29)
+//! # Sleep hold
 //!
-//! After the compositor releases a sleep it refuses attempts and verdicts
-//! until the sleep is over, and a new instance starts in that hold. This is
-//! the model's amended `option_sleep_hold`, the recommended answer to open
-//! decision O-29, which the owner has **not confirmed**. The rule begins in
-//! one place, the private `State::begin_sleep_hold`; emptying that function
-//! restores the design without the hold.
+//! REQ-LOCK-026: an instance starts held and enters a fresh hold on receipt
+//! of a sleep request. A current bridge report or a clock jump ends the hold.
+//! Only a fresh lock presentation can make authentication available after
+//! waking or returning to an enabled output.
 
 use core::time::Duration;
 
@@ -48,6 +46,13 @@ pub const UI_BACKOFF_MAX: Duration = Duration::from_secs(8);
 /// field that tells an old verdict from a new attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InstanceId(pub [u8; 16]);
+
+/// The instance and generation of one sleep hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HoldToken {
+    pub instance: InstanceId,
+    pub generation: u64,
+}
 
 /// The login session, as the bytes of its identifier padded with zeros.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -189,9 +194,11 @@ pub enum Event {
         /// Echoed in [`Effect::ReleaseSleepInhibitor`].
         nonce: u64,
     },
-    /// The bridge reports that logind is not preparing for sleep: after a
-    /// resume, or for a sleep that never happened.
-    Resumed,
+    /// A bridge connected on the authenticated bridge channel.
+    BridgeConnected,
+    /// The bridge holds a delay inhibitor and logind is no longer preparing
+    /// for the sleep associated with this token.
+    SleepOver { token: HoldToken },
     /// logind's delay ran out before the sleep was released.
     InhibitorTimedOut,
     /// logind `Unlock`. Ignored.
@@ -251,10 +258,13 @@ pub enum Effect {
         /// The lock that is now acknowledged.
         epoch: u64,
     },
+    /// Send the current hold token to the bridge.
+    OfferSleepHold(HoldToken),
     /// Answer the bridge's sleep request so that it releases the inhibitor.
     ReleaseSleepInhibitor {
         /// Nonce of the request this answers.
         nonce: u64,
+        token: HoldToken,
     },
     /// Start a new `lock/ui` process with a new credential channel.
     StartUi {
@@ -315,6 +325,7 @@ pub struct State {
     epoch: u64,
     attempt: u32,
     hold: bool,
+    hold_generation: u64,
     /// Nonce of a sleep request that waits for `Locked`.
     sleep_request: Option<u64>,
     /// Nonce answered last, so that a repeated request is answered once.
@@ -334,13 +345,14 @@ impl State {
     /// starts covered. The output counts as on until [`Event::OutputOff`].
     #[must_use]
     pub fn start(config: Config, now: Clocks) -> (Self, Vec<Effect>) {
-        let mut state = Self {
+        let state = Self {
             config,
             watch: SleepWatch::new(now, config.jump_threshold),
             phase: Phase::Locking,
             epoch: 1,
             attempt: 0,
-            hold: false,
+            hold: true,
+            hold_generation: 0,
             sleep_request: None,
             answered: None,
             output_on: true,
@@ -349,12 +361,12 @@ impl State {
             ui_serial: 0,
             ui_failures: 0,
         };
-        state.begin_sleep_hold();
-        let effects = vec![
+        let mut effects = vec![
             Effect::RouteInput(InputMode::Nobody),
             Effect::ShowFallback,
             Effect::ScheduleFrame,
         ];
+        state.offer_sleep_hold(&mut effects);
         (state, effects)
     }
 
@@ -382,19 +394,35 @@ impl State {
         }
     }
 
-    /// The sleep hold of open decision O-29, not confirmed by the owner.
-    ///
-    /// Called when a sleep is released and when an instance starts, which
-    /// cannot know whether its predecessor released one. While the hold lasts
-    /// no `lock/ui` runs, so no attempt opens and no verdict is accepted. It
-    /// ends in `wake`. With this body empty the hold never begins.
-    const fn begin_sleep_hold(&mut self) {
+    /// The active token, if one can still be issued without reuse.
+    #[must_use]
+    pub const fn hold_token(&self) -> Option<HoldToken> {
+        if self.hold && self.hold_generation < u64::MAX {
+            Some(HoldToken {
+                instance: self.config.instance,
+                generation: self.hold_generation,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn offer_sleep_hold(&self, effects: &mut Vec<Effect>) {
+        if let Some(token) = self.hold_token() {
+            effects.push(Effect::OfferSleepHold(token));
+        }
+    }
+
+    fn begin_sleep_hold(&mut self, effects: &mut Vec<Effect>) {
         self.hold = true;
+        self.hold_generation = self.hold_generation.saturating_add(1);
+        self.sync_ui(effects);
+        self.offer_sleep_hold(effects);
     }
 
     /// REQ-LOCK-007, REQ-LOCK-003, REQ-LOCK-021: a lock is a new epoch, takes
     /// the input from the clients and ends every grant, in one step.
-    fn lock(&mut self, effects: &mut Vec<Effect>) {
+    fn lock(&mut self, effects: &mut Vec<Effect>, acknowledge_dark: bool) {
         if self.phase != Phase::Unlocked {
             return;
         }
@@ -408,7 +436,7 @@ impl State {
             Effect::ScheduleFrame,
         ]);
         // REQ-LOCK-010: nothing is visible, so no flip has to be awaited.
-        if !self.output_on {
+        if acknowledge_dark && !self.output_on {
             self.acknowledge(effects);
         }
     }
@@ -426,14 +454,14 @@ impl State {
     fn answer_sleep_request(&mut self, effects: &mut Vec<Effect>) {
         if self.phase == Phase::Locked
             && let Some(nonce) = self.sleep_request.take()
+            && let Some(token) = self.hold_token()
         {
             self.answered = Some(nonce);
-            effects.push(Effect::ReleaseSleepInhibitor { nonce });
-            self.begin_sleep_hold();
+            effects.push(Effect::ReleaseSleepInhibitor { nonce, token });
         }
     }
 
-    /// The machine slept, or logind says that no sleep is under way.
+    /// The two clocks show that the machine slept.
     ///
     /// REQ-LOCK-015, REQ-LOCK-016, REQ-AUTH-016, REQ-GRANT-006: the session
     /// locks, the open attempt and every grant are void, and a flip from
@@ -444,17 +472,13 @@ impl State {
         if self.flight != Flight::Idle {
             self.flight = Flight::Unverified;
         }
-        // A process that never had the input holds nothing from before the
-        // sleep, so a second report of one sleep does not restart it again.
-        if self.ui != Ui::Starting {
-            self.drop_ui(true, effects);
-        }
         if self.phase == Phase::Unlocked {
-            self.lock(effects);
+            self.lock(effects, false);
         } else {
+            self.phase = Phase::Locking;
+            self.sync_ui(effects);
             effects.extend([Effect::RevokeAllGrants, Effect::ScheduleFrame]);
         }
-        self.sync_ui(effects);
     }
 
     /// Ends the current `lock/ui` process and the attempt it may have open.
@@ -477,7 +501,7 @@ impl State {
     /// Runs `lock/ui` exactly while an attempt could be opened: `Locked` and
     /// not in the sleep hold. REQ-TRUST-002: every start is a new process.
     fn sync_ui(&mut self, effects: &mut Vec<Effect>) {
-        if self.phase != Phase::Locked || self.hold {
+        if self.phase != Phase::Locked || self.hold || !self.output_on {
             self.drop_ui(true, effects);
         } else if self.ui == Ui::Stopped {
             // Serials only tell a process from the ones around it.
@@ -517,16 +541,23 @@ impl State {
             Event::Tick | Event::LogindUnlock => {}
             // After the timeout the machine sleeps whatever happens here; a
             // pending request is kept so that the hold still begins.
-            Event::LockRequested | Event::InhibitorTimedOut => self.lock(effects),
+            Event::LockRequested | Event::InhibitorTimedOut => self.lock(effects, true),
             Event::PrepareForSleep { nonce } => {
-                if self.answered != Some(nonce) {
+                if self.answered != Some(nonce) && self.sleep_request != Some(nonce) {
                     self.sleep_request = Some(nonce);
-                    self.lock(effects);
+                    self.begin_sleep_hold(effects);
+                    self.lock(effects, true);
                     self.answer_sleep_request(effects);
+                }
+            }
+            Event::BridgeConnected => self.offer_sleep_hold(effects),
+            Event::SleepOver { token } => {
+                if self.hold_token() == Some(token) {
+                    self.hold = false;
+                    self.sleep_request = None;
                     self.sync_ui(effects);
                 }
             }
-            Event::Resumed => self.wake(effects),
             Event::FrameSubmitted(content) => {
                 let alone = self.flight == Flight::Idle && content == Content::Protected;
                 self.flight = if alone {
@@ -557,9 +588,15 @@ impl State {
                 self.flight = Flight::Idle;
                 if self.phase == Phase::Locking {
                     self.acknowledge(effects);
+                } else {
+                    self.sync_ui(effects);
                 }
             }
             Event::OutputOn => {
+                if !self.output_on && self.phase == Phase::Locked {
+                    self.phase = Phase::Locking;
+                    self.flight = Flight::Idle;
+                }
                 self.output_on = true;
                 self.redraw(effects);
             }
@@ -606,7 +643,11 @@ impl State {
     /// is dropped and consumes nothing.
     fn judge(&mut self, binding: Binding, outcome: Outcome, effects: &mut Vec<Effect>) {
         // The last epoch can never be followed by a new one, so it must not end.
-        let open = matches!(self.ui, Ui::Checking { .. }) && self.epoch < u64::MAX;
+        let open = self.phase == Phase::Locked
+            && self.output_on
+            && !self.hold
+            && matches!(self.ui, Ui::Checking { .. })
+            && self.epoch < u64::MAX;
         if !open || binding != self.binding() {
             return;
         }
@@ -677,7 +718,8 @@ fn audit(
         return Err("A: unlocked without a verdict for the open attempt");
     }
 
-    let locked = before.phase != Phase::Locked && after.phase == Phase::Locked;
+    let reacknowledged = slept && input.event == Event::OutputOff;
+    let locked = (before.phase != Phase::Locked || reacknowledged) && after.phase == Phase::Locked;
     let shown = before.phase == Phase::Locking
         && before.flight == Flight::Protected
         && input.event == Event::FramePresented(Content::Protected)
@@ -694,7 +736,7 @@ fn audit(
     if after.epoch < before.epoch || (relocked != fresh && before.epoch != u64::MAX) {
         return Err("epoch reused or skipped");
     }
-    if after.ui != Ui::Stopped && (after.phase != Phase::Locked || after.hold) {
+    if after.ui != Ui::Stopped && (after.phase != Phase::Locked || after.hold || !after.output_on) {
         return Err("lock/ui runs while no attempt may open");
     }
     if after.sleep_request.is_some() && after.phase != Phase::Locking {
