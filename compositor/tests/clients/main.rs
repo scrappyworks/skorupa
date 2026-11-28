@@ -208,6 +208,27 @@ fn req_api_001_one_client_tracks_its_windows_on_different_workspaces() {
 }
 
 #[test]
+fn req_api_001_scale_change_rejects_nonintegral_retained_buffer_dimensions() {
+    use wayland_client::protocol::wl_surface;
+
+    let mut fixture = Fixture::new(config());
+    for (width, height) in [(3, 4), (4, 3)] {
+        let mut client = fixture.connect();
+        let root = client.create_window();
+        fixture.sync(&mut client);
+        let buffer = client.buffer(width, height, Format::Xrgb8888, RED);
+        client.commit(&root, Some(&buffer));
+        fixture.sync(&mut client);
+        root.surface.set_buffer_scale(2);
+        root.surface.commit();
+        fixture.exchange(&mut client);
+        let error = client.protocol_error().unwrap();
+        assert_eq!(error.object_interface, "wl_surface");
+        assert_eq!(error.code, wl_surface::Error::InvalidSize as u32);
+    }
+}
+
+#[test]
 fn req_api_001_scale_only_commit_resizes_the_attached_buffer() {
     let mut fixture = Fixture::new(config());
     let background = fixture.color();
@@ -573,6 +594,30 @@ fn req_api_011_client_that_disconnects_mid_frame_leaves_the_rest_running() {
     assert_eq!(fixture.color(), YELLOW);
     assert_eq!(stays.data.presented.last().unwrap().time, flip + 2 * HZ_60);
     assert!(stays.protocol_error().is_none());
+}
+
+#[test]
+fn req_api_001_attached_buffer_dimensions_are_multiples_of_the_pending_scale() {
+    use wayland_client::protocol::wl_surface;
+
+    let mut fixture = Fixture::new(config());
+    for (width, height) in [(3, 4), (4, 3), (4, 4)] {
+        let mut client = fixture.connect();
+        let window = client.create_window();
+        fixture.sync(&mut client);
+        window.surface.set_buffer_scale(2);
+        let buffer = client.buffer(width, height, Format::Xrgb8888, RED);
+        client.commit(&window, Some(&buffer));
+        fixture.exchange(&mut client);
+        if (width, height) == (4, 4) {
+            assert!(client.protocol_error().is_none());
+            assert_eq!(fixture.color(), RED);
+        } else {
+            let error = client.protocol_error().unwrap();
+            assert_eq!(error.object_interface, "wl_surface");
+            assert_eq!(error.code, wl_surface::Error::InvalidSize as u32);
+        }
+    }
 }
 
 #[test]
