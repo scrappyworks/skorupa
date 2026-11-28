@@ -159,7 +159,9 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         }
 
         let timeout = compositor.next_deadline().map_or(CONTROL_POLL, |deadline| {
-            deadline.saturating_sub(now.monotonic).min(CONTROL_POLL)
+            deadline
+                .saturating_sub(read_lock_clocks().monotonic)
+                .min(CONTROL_POLL)
         });
         event_loop.dispatch(Some(timeout), &mut compositor)?;
     }
