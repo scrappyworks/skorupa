@@ -850,11 +850,14 @@ impl Layout {
             ws.fullscreen = ws.fullscreen.filter(|&fullscreen| Some(fullscreen) == tile);
         }
 
-        let (active, last) = (self.workspaces[self.active].id, self.workspaces.len() - 1);
-        let mut index = 0..;
+        let active = self.workspaces[self.active].id;
+        // An emptied active workspace can itself serve as the trailing one.
+        let active_is_tail = self.workspaces[self.active..]
+            .iter()
+            .all(|ws| ws.tiles.is_empty());
+        let tail = self.workspaces.last().map(|ws| ws.id);
         self.workspaces.retain(|ws| {
-            let last = index.next() == Some(last);
-            last || ws.id == active || !ws.tiles.is_empty()
+            ws.id == active || !ws.tiles.is_empty() || (!active_is_tail && Some(ws.id) == tail)
         });
         let active = |ws: &Workspace| ws.id == active;
         self.active = self.workspaces.iter().position(active).unwrap_or(0);
