@@ -153,6 +153,7 @@ fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
         );
     }
     assert_eq!(client.data.mode, Some((WIDTH, HEIGHT, 60_000)));
+    assert_eq!(client.data.preferred_mode, client.data.mode);
     // CLOCK_MONOTONIC: the clock the test's times stand for.
     assert_eq!(client.data.clock_id, Some(1));
 

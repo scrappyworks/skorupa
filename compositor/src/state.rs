@@ -82,6 +82,29 @@ impl Config {
     }
 }
 
+/// Create the single Wayland output with its preferred mode active at the origin.
+pub(crate) fn configured_output(
+    name: String,
+    mode: Mode,
+    physical_mm: (i32, i32),
+    model: &str,
+    serial_number: &str,
+) -> Output {
+    let output = Output::new(
+        name,
+        PhysicalProperties {
+            size: physical_mm.into(),
+            subpixel: Subpixel::Unknown,
+            make: "Skorupa".into(),
+            model: model.into(),
+            serial_number: serial_number.into(),
+        },
+    );
+    output.set_preferred(mode);
+    output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+    output
+}
+
 pub(crate) struct Window {
     pub(crate) id: WindowId,
     pub(crate) toplevel: ToplevelSurface,
@@ -161,18 +184,7 @@ impl State {
             size: config.output_size.into(),
             refresh: config.refresh_mhz,
         };
-        let output = Output::new(
-            "HEADLESS-1".into(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "Skorupa".into(),
-                model: "headless".into(),
-                serial_number: "1".into(),
-            },
-        );
-        output.set_preferred(mode);
-        output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+        let output = configured_output("HEADLESS-1".into(), mode, (0, 0), "headless", "1");
         let backend = Headless::new(&output, mode.size)?;
         Self::with_backend(dh, config, output, Backend::Headless(Box::new(backend)))
     }
