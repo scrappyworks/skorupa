@@ -136,7 +136,7 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
             && control.join("vt-switch").try_exists()?
             && compositor.session_phase() == Some(Phase::Locking)
         {
-            fs::write(control.join("vt-fenced"), [])?;
+            verify_verdict_while_paused(&mut compositor, control)?;
             vt_paused = true;
         }
         if let Some((ui, ready)) = compositor.pending_lock_ui()
@@ -165,6 +165,29 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         });
         event_loop.dispatch(Some(timeout), &mut compositor)?;
     }
+}
+
+// REQ-AUTH-004: consume the stale verdict before the guest returns to the seat.
+fn verify_verdict_while_paused(
+    compositor: &mut Compositor,
+    control: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let unread = |compositor: &Compositor| -> Result<u64, Box<dyn Error>> {
+        let fd = compositor.authd_fd().ok_or("broker connection closed")?;
+        Ok(rustix::io::ioctl_fionread(fd)?)
+    };
+    fs::write(control.join("vt-fenced"), [])?;
+    wait_for_marker(&control.join("vt-verdict-sent"))?;
+    if unread(compositor)? == 0 {
+        return Err("expected a queued verdict before dispatch".into());
+    }
+    compositor.dispatch(read_lock_clocks().monotonic)?;
+    expect_lock(compositor, Phase::Locking)?;
+    if unread(compositor)? != 0 {
+        return Err("verdict was not consumed while the seat was inactive".into());
+    }
+    fs::write(control.join("vt-verdict-handled"), [])?;
+    Ok(())
 }
 
 // REQ-PERF-013: keep handling redraws and watchdog timers while the notifier
@@ -312,6 +335,9 @@ fn run_broker(control: &Path) -> Result<(), Box<dyn Error>> {
             )?;
         } else {
             send_verdict(&mut output, current)?;
+            if number == 6 {
+                fs::write(control.join("vt-verdict-sent"), [])?;
+            }
             previous_grant = Some(current);
         }
     }
