@@ -8,8 +8,8 @@ machine.start()
 machine.wait_for_unit("user@1000.service")
 runtime_dir = "/run/user/1000"
 user = f"runuser -u alice -- env XDG_RUNTIME_DIR={runtime_dir}"
-wayland = f"{user} WAYLAND_DISPLAY=wayland-0"
-machine.wait_for_file(f"{runtime_dir}/wayland-0")
+wayland = f"{user} WAYLAND_DISPLAY=wayland-1"
+machine.wait_for_file(f"{runtime_dir}/wayland-1")
 machine.succeed(f"{wayland} wayland-info")
 
 
@@ -20,7 +20,7 @@ def start_terminal(name: str, color: str) -> None:
         "exec sleep infinity"
     )
     machine.succeed(
-        f"{user} systemd-run --user --unit={name} -E WAYLAND_DISPLAY=wayland-0 "
+        f"{user} systemd-run --user --unit={name} -E WAYLAND_DISPLAY=wayland-1 "
         f"foot --override=colors.background={color} --title={name} "
         f"sh -c {quote(command)}"
     )
