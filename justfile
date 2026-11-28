@@ -80,7 +80,7 @@ fuzz-smoke:
 flake-check:
     {{ nix }} flake check --print-build-logs
 
-# Exhaust all four-byte prefixes and all byte strings up to 38 bytes (Kani 0.68).
+# Prove frame prefix bounds, canonical decoding up to 38 bytes and the session ID alphabet.
 prove-protocol:
     cargo kani -p skorupa-protocol --lib --output-format terse
 
