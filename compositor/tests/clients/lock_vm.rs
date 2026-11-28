@@ -246,13 +246,7 @@ fn run_broker(control: &Path) -> Result<(), Box<dyn Error>> {
         fs::write(control.join(format!("challenge-{number}")), [])?;
         wait_for_marker(&control.join(format!("answer-{number}")))?;
 
-        let current = Verdict {
-            compositor_instance: challenge.compositor_instance,
-            session: challenge.session,
-            epoch: challenge.epoch,
-            attempt: challenge.attempt,
-            outcome: Outcome::Granted,
-        };
+        let current = challenge.verdict(Outcome::Granted);
         let stale = match number {
             1 => Some(Verdict {
                 attempt: Attempt(current.attempt.0.wrapping_add(1)),
