@@ -307,6 +307,47 @@ fn req_grant_007_grant_and_consent_end_with_the_window_generation() {
     assert_eq!(rig.live(), []);
 }
 
+/// REQ-GRANT-005: revoking either of two streams preserves the other and
+/// identifies the ended stream on the very next delivery attempt.
+#[test]
+fn req_grant_001_targeted_revocation_withholds_only_the_ended_stream() {
+    for revoke_first in [true, false] {
+        let mut rig = Rig::v1();
+        let first = rig.grant(STREAM);
+        let second = rig.grant(STREAM);
+        let (ended, surviving) = if revoke_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert_eq!(
+            rig.send(Event::Revoke {
+                generation: ended.generation
+            }),
+            [Effect::Revoked {
+                grant: ended,
+                cause: Cause::Revoked
+            }]
+        );
+        assert_eq!(rig.state.grants(), &[surviving]);
+        for grant in [ended, surviving] {
+            let generation = grant.generation;
+            let event = Event::Use {
+                generation,
+                kind: grant.kind,
+                target: grant.target,
+                connection: grant.connection,
+            };
+            let expected = if grant == ended {
+                Effect::Withhold { generation }
+            } else {
+                Effect::Deliver { generation }
+            };
+            assert_eq!(rig.send(event), [expected]);
+        }
+    }
+}
+
 /// REQ-GRANT-008, REQ-CAP-006: Stop names one stream generation of this
 /// instance, and after it nothing is delivered.
 #[test]
