@@ -1186,3 +1186,64 @@ fn req_grant_013_zero_ttl_request_creates_no_live_grant() {
     );
     assert_eq!(rig.state.next_expiry(), None);
 }
+
+#[test]
+fn req_trust_012_request_at_prompt_expiry_uses_the_vacated_queue_slot() {
+    for tick_first in [false, true] {
+        let mut rig = Rig::v1();
+        rig.step(Event::Requested(STREAM));
+        let expired = rig.prompt.unwrap();
+        for _ in 0..MAX_QUEUED {
+            assert_eq!(rig.step(Event::Requested(TRANSFER)), []);
+        }
+        rig.pass(skorupa_compositor_core::grant::PROMPT_TIMEOUT);
+        let mut effects = Vec::new();
+        if tick_first {
+            effects = rig.step(Event::Tick);
+        }
+        effects.extend(rig.step(Event::Requested(STREAM)));
+        assert_eq!(
+            effects,
+            [
+                Effect::ClosePrompt { prompt: expired },
+                Effect::Denied {
+                    request: STREAM,
+                    cause: Cause::Expired
+                },
+                Effect::ShowPrompt {
+                    prompt: PromptId {
+                        number: expired.number + 1,
+                        ..expired
+                    },
+                    request: TRANSFER,
+                },
+            ]
+        );
+        assert_eq!(
+            rig.step(Event::Requested(STREAM)),
+            [Effect::Denied {
+                request: STREAM,
+                cause: Cause::Full
+            }]
+        );
+        for index in 0..MAX_QUEUED {
+            let effects = rig.answer(false);
+            let next = if index + 1 == MAX_QUEUED {
+                STREAM
+            } else {
+                TRANSFER
+            };
+            assert!(matches!(effects.as_slice(), [
+                Effect::Denied { request: TRANSFER, cause: Cause::Declined },
+                Effect::ShowPrompt { request, .. },
+            ] if *request == next));
+        }
+        assert_eq!(
+            rig.answer(false),
+            [Effect::Denied {
+                request: STREAM,
+                cause: Cause::Declined
+            }]
+        );
+    }
+}
