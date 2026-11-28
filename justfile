@@ -53,6 +53,7 @@ budget:
 
 # Every test names a requirement id; ids in tests and spec/*.qnt exist in docs/requirements.md.
 req-lint:
+    python3 -B scripts/test_req_lint.py
     python3 -B scripts/req-lint.py
 
 # Advisories, licenses, bans and sources for each lockfile. Fetches the RustSec database.
