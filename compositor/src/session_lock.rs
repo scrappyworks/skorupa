@@ -409,6 +409,10 @@ mod tests {
             .dispatch_with_clock(now, &mut || samples.next().unwrap_or(resumed))
             .unwrap();
         assert_ne!(compositor.session_phase(), Some(lock::Phase::Unlocked));
+        // A transient unlock followed by the pre-render resume check would
+        // also finish locked, but the re-lock would have minted a new epoch.
+        let session = compositor.state.session_lock.as_ref().unwrap();
+        assert_eq!(session.reducer.view().epoch, verdict().epoch.0);
     }
 
     #[test]
