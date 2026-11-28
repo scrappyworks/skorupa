@@ -441,6 +441,8 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
     second.read();
 
     assert_eq!(fixture.color(), RED);
+    assert!(first.data.on_output);
+    assert!(!second.data.on_output);
     assert!(first.data.configures.last().unwrap().activated());
     assert!(!second.data.configures.last().unwrap().activated());
     assert_eq!(second.data.keys, [Key::Keymap]);
@@ -454,6 +456,8 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
     second.read();
 
     assert_eq!(fixture.color(), BLUE);
+    assert!(!first.data.on_output);
+    assert!(second.data.on_output);
     assert!(!first.data.configures.last().unwrap().activated());
     assert!(second.data.configures.last().unwrap().activated());
     assert!(first.data.keys.contains(&Key::Leave));

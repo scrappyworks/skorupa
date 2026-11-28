@@ -39,6 +39,8 @@ impl Layout for WorkspaceLayout {
     }
 
     fn placements(&self) -> Vec<(WindowId, Rectangle<i32, Logical>)> {
+        let output = self.0.output();
+        let viewport = Rectangle::from_size((output.w, output.h).into());
         self.0
             .project()
             .windows
@@ -50,6 +52,7 @@ impl Layout for WorkspaceLayout {
                     Rectangle::new((rect.x, rect.y).into(), (rect.w, rect.h).into()),
                 )
             })
+            .filter(|(_, slot)| viewport.overlaps(*slot))
             .collect()
     }
 
