@@ -156,6 +156,13 @@ module ablate_sleep_hold {
   run counterexampleSuspendTest = cx_no_sleep_hold_suspend
 }
 
+/// A sleep request only starts the hold once it is acknowledged.
+module ablate_late_sleep_hold {
+  import defects.* from "./lock"
+  import lock(DEFECT = LateSleepHold, AGENT_CAPTURE = false).* from "./lock"
+  run counterexampleTest = cx_late_sleep_hold
+}
+
 /// The hold lives in compositor memory only; a new instance starts without it.
 module ablate_hold_restart {
   import defects.* from "./lock"
