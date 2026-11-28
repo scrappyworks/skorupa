@@ -729,3 +729,13 @@ fn req_layout_018_projection_places_every_workspace_in_one_space() {
     assert_eq!(windows[1].rect, rect(0, 40, 500, 760));
     assert_eq!(windows[2].rect, rect(500, 40, 501, 760));
 }
+
+#[test]
+fn req_layout_013_last_window_closing_keeps_one_trailing_workspace() {
+    let layout = run(start(), [open(1), open(2)]);
+    let emptied = layout.workspaces()[layout.active()].id;
+    let layout = run(layout, [Event::Unmap(w(2))]);
+    assert_eq!(tiles(&layout), [vec![1], vec![]]);
+    assert_eq!(layout.workspaces()[layout.active()].id, emptied);
+    assert_eq!(run(layout.clone(), [Event::WorkspaceDown]), layout);
+}

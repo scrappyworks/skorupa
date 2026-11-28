@@ -185,6 +185,7 @@ fn check_state(layout: &Layout, mapped: &BTreeSet<WindowId>) -> Result<(), TestC
         // REQ-LAYOUT-013: empty at the end, and otherwise only under the user.
         if index + 1 == spaces.len() {
             prop_assert!(ws.tiles.is_empty());
+            prop_assert!(index == 0 || !spaces[index - 1].tiles.is_empty());
         } else {
             prop_assert!(!ws.tiles.is_empty() || index == layout.active());
         }
