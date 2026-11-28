@@ -48,6 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let buffer = client.buffer_with(width, height, Format::Xrgb8888, pixel);
     client.commit(&window, Some(&buffer));
+    let mut feedback_marker = ready.as_ref().map(|path| path.with_extension("feedback"));
     if let Some(path) = ready {
         client.roundtrip()?;
         fs::write(path, [])?;
@@ -56,6 +57,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let pending = marker.with_extension("pending");
     let mut keys = Vec::new();
     loop {
+        if let Some(feedback) = client.data.presented.first()
+            && let Some(path) = feedback_marker.take()
+        {
+            fs::write(path, feedback.flags.to_string())?;
+        }
         client.wait()?;
         let previous = keys.len();
         for event in client.data.keys.drain(..) {
