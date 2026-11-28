@@ -3,11 +3,13 @@
 //! Stage 1 offers `wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat` with a
 //! keyboard, `wl_output` and `wp_presentation`, each for every client.
 
+mod admission;
+
 use std::error::Error;
 use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::FramePacer;
-use skorupa_compositor_core::layout::{Effect, Event, MAX_APP_ID_LEN, MAX_WINDOWS};
+use skorupa_compositor_core::layout::{Effect, Event, MAX_APP_ID_LEN};
 use smithay::backend::input::{InputTime, KeyState};
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::backend::renderer::{ImportMemWl, buffer_dimensions};
@@ -17,7 +19,6 @@ use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::backend::{ClientData, GlobalId};
-use smithay::reexports::wayland_server::protocol::__interfaces::WL_DISPLAY_INTERFACE;
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::{self, WlSurface};
@@ -85,34 +86,6 @@ pub(crate) struct Window {
     pub(crate) id: WindowId,
     pub(crate) toplevel: ToplevelSurface,
     mapped: bool,
-}
-
-/// Reserve a fresh id for an xdg role before its first commit.
-fn take_window_id(next: &mut u64, registered: usize) -> Option<WindowId> {
-    if registered >= MAX_WINDOWS {
-        return None;
-    }
-    let id = WindowId(*next);
-    *next = next.checked_add(1)?;
-    Some(id)
-}
-
-/// `wayland-server` handles `wl_display` internally. Report its global `no_memory`
-/// error on the display object itself, so the client decodes the right enum.
-fn window_limit_reached(surface: &WlSurface) {
-    const DISPLAY_ID: u32 = 1;
-    const NO_MEMORY: u32 = 2;
-    if let Some(handle) = surface.handle().upgrade()
-        && let Ok(client) = handle.get_client(surface.id())
-        && let Ok(display) =
-            handle.object_for_protocol_id(client, &WL_DISPLAY_INTERFACE, DISPLAY_ID)
-    {
-        handle.post_error(
-            display,
-            NO_MEMORY,
-            c"no toplevel window slots available".into(),
-        );
-    }
 }
 
 /// Per-client data that Smithay asks for.
@@ -483,8 +456,9 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let Some(id) = take_window_id(&mut self.next_window_id, self.windows.len()) else {
-            window_limit_reached(surface.wl_surface());
+        let Some(id) = admission::take_window_id(&mut self.next_window_id, self.windows.len())
+        else {
+            admission::window_limit_reached(surface.wl_surface());
             return;
         };
         self.windows.push(Window {
@@ -544,30 +518,3 @@ impl OutputHandler for State {}
 impl PointerConstraintsHandler for State {}
 
 smithay::delegate_dispatch2!(State);
-
-#[cfg(test)]
-mod tests {
-    use super::{MAX_WINDOWS, WindowId, take_window_id};
-
-    #[test]
-    fn req_api_012_window_id_admission_checks_the_registered_role_count() {
-        let mut next = 40;
-        assert_eq!(
-            take_window_id(&mut next, MAX_WINDOWS - 1),
-            Some(WindowId(40))
-        );
-        assert_eq!(take_window_id(&mut next, MAX_WINDOWS), None);
-        assert_eq!(
-            take_window_id(&mut next, MAX_WINDOWS - 1),
-            Some(WindowId(41))
-        );
-    }
-
-    #[test]
-    fn req_api_012_exhausted_window_ids_are_never_reused() {
-        let mut next = u64::MAX - 1;
-        assert_eq!(take_window_id(&mut next, 0), Some(WindowId(u64::MAX - 1)));
-        assert_eq!(take_window_id(&mut next, 0), None);
-        assert_eq!(next, u64::MAX);
-    }
-}
