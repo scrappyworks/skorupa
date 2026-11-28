@@ -506,6 +506,7 @@ impl World {
         let generation = grant.generation;
         let effects = self.grant_event(grant::Event::Use {
             generation,
+            kind: grant.kind,
             connection: self.connection(grant.kind),
             target: Target::Window(self.window),
         });

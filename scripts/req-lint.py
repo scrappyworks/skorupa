@@ -7,8 +7,8 @@
 3. Every requirement named this way, and every `REQ-...` in the Quint model
    (spec/*.qnt), is listed in docs/requirements.md.
 
-Step 3 is skipped, with a loud notice, only while the catalog does not exist
-at all. A branch that lacks the catalog although main has it fails.
+The catalog must exist in both a checkout and a source export. Only ids
+defined in the first cell of a catalog or model mapping row count.
 
 Exits with 1 when a check fails.
 
@@ -17,14 +17,12 @@ Exits with 1 when a check fails.
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
 
 from sources import repository_files
 
 REQUIREMENTS = Path("docs/requirements.md")
-MAIN = "origin/main"
 # Anything that claims to be an id: REQ-PROTO-001, and also REQ-SOME-NAME, so
 # that an id in another style is reported instead of overlooked.
 ID_IN_TEXT = re.compile(r"\bREQ-[A-Z0-9]+(?:-[A-Z0-9]+)+\b")
@@ -32,19 +30,6 @@ ID_IN_NAME = re.compile(r"(?:^|_)req_([a-z][a-z0-9]*)_([0-9]+)(?=_|$)")
 TEST_ATTRIBUTE = re.compile(r"\s*#\[test\]")
 FUNCTION = re.compile(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")
 DOC_OR_ATTRIBUTE = re.compile(r"\s*(///|#\[)")
-
-
-def catalog_on_main(root: Path) -> bool:
-    """Whether main has the catalog. False when git cannot tell."""
-    try:
-        found = subprocess.run(
-            ["git", "cat-file", "-e", f"{MAIN}:{REQUIREMENTS}"],
-            cwd=root,
-            capture_output=True,
-        )
-    except FileNotFoundError:
-        return False
-    return found.returncode == 0
 
 
 def tests(lines: list[str]):
@@ -105,30 +90,24 @@ def main() -> int:
                 used.setdefault(requirement, f"{shown}:{number}")
 
     requirements = root / REQUIREMENTS
-    notice = None
     if requirements.is_file():
-        known = set(ID_IN_TEXT.findall(requirements.read_text(encoding="utf-8")))
+        known = set()
+        for line in requirements.read_text(encoding="utf-8").splitlines():
+            cells = line.strip().split("|", 2)
+            if len(cells) == 3 and not cells[0] and ID_IN_TEXT.fullmatch(cells[1].strip()):
+                known.add(cells[1].strip())
         for requirement, where in sorted(used.items()):
             if requirement not in known:
                 failures.append(f"{where}: {requirement} is not in {REQUIREMENTS}")
         checked = f"checked against {REQUIREMENTS}"
-    elif catalog_on_main(root):
-        failures.append(f"{REQUIREMENTS} exists on {MAIN} but not here: rebase onto main")
-        checked = "NOT checked"
     else:
+        failures.append(f"missing requirement catalog: {REQUIREMENTS}")
         checked = "NOT checked"
-        notice = (
-            f"WARNING: {REQUIREMENTS} DOES NOT EXIST. The {len(used)} requirement ids in use "
-            "were NOT checked against the catalog. This is acceptable only until the catalog lands."
-        )
 
     print(
         f"req-lint: {count} tests and fuzz targets, {len(models)} model files, "
         f"{len(used)} requirement ids: {checked}"
     )
-    if notice:
-        bar = "!" * 78
-        print(f"{bar}\nreq-lint: {notice}\n{bar}", file=sys.stderr)
     for failure in failures:
         print(f"req-lint: {failure}", file=sys.stderr)
     return 1 if failures else 0
