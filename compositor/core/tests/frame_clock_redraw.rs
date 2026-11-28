@@ -827,3 +827,22 @@ fn req_perf_012_software_flip_between_half_and_full_refresh_waits() {
         hw_clock: false,
     }));
 }
+
+#[test]
+fn req_perf_012_software_flip_without_a_known_rate_uses_the_fallback() {
+    let mut output = Harness::new(None);
+    output.redraw(ms(100));
+    output.rendered(ms(100), RenderOutcome::Submitted);
+    output.flip(ms(100), None, 1);
+    output.redraw(ms(106));
+    output.rendered(ms(106), RenderOutcome::Submitted);
+    output.flip(ms(106), None, 2);
+    let at = ms(100) + Duration::from_micros(16_667);
+    assert_eq!(output.deadline(Timer::Throttle), Some(at));
+    assert!(output.fire(Timer::Throttle).contains(&Effect::Presented {
+        time: at,
+        refresh: None,
+        sequence: 2,
+        hw_clock: false,
+    }));
+}

@@ -359,7 +359,11 @@ impl FramePacer {
         let mut timestamp = time.unwrap_or(now);
         let replaces_held_flip = self.held_flip.take().is_some();
 
-        if let Some(at) = self.throttle.deadline(refresh, time, now) {
+        // A software completion has no physical vblank to pace it when the
+        // output rate is unknown. Use the same estimate as an undamaged frame.
+        let pacing_interval =
+            refresh.or_else(|| time.is_none().then_some(FALLBACK_REFRESH_INTERVAL));
+        if let Some(at) = self.throttle.deadline(pacing_interval, time, now) {
             if at > now {
                 self.cancel_watchdog(effects);
                 self.held_flip = Some(sequence);
