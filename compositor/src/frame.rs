@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::{Effect, Event, RedrawState, RenderOutcome, Timer};
-use skorupa_compositor_core::lock::{Content, Event as LockEvent};
+use skorupa_compositor_core::lock::{Clocks, Content, Event as LockEvent};
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
@@ -104,14 +104,18 @@ struct CoverTimer {
 }
 
 impl CoverTimer {
+    fn arm(&mut self, now: Duration) {
+        if self.attempts == 0 && self.deadline.is_none() {
+            self.deadline = Some(now.saturating_add(COVER_TIMEOUT));
+        }
+    }
+
     fn blank_due(&mut self, now: Duration, waiting_for_cover: bool) -> bool {
         if !waiting_for_cover {
             *self = Self::default();
             return false;
         }
-        if self.attempts == 0 && self.deadline.is_none() {
-            self.deadline = Some(now.saturating_add(COVER_TIMEOUT));
-        }
+        self.arm(now);
         if self.deadline.is_none_or(|at| now < at) {
             return false;
         }
@@ -119,6 +123,13 @@ impl CoverTimer {
         self.deadline =
             (self.attempts < COVER_BLANK_ATTEMPTS).then_some(now.saturating_add(COVER_RETRY));
         true
+    }
+
+    fn recovery_signal(&mut self, now: Duration) {
+        if self.attempts == COVER_BLANK_ATTEMPTS {
+            self.attempts = 0;
+            self.deadline = Some(now.saturating_add(COVER_RETRY));
+        }
     }
 }
 
@@ -175,7 +186,16 @@ impl Timers {
 struct LastFrameCallback(Cell<Option<u32>>);
 
 impl State {
+    pub(crate) fn arm_cover_deadline(&mut self, now: Duration) {
+        if matches!(&self.backend, Backend::Drm(backend) if backend.can_blank()) {
+            self.timers.cover.arm(now);
+        }
+    }
+
     pub(crate) fn queue_redraw(&mut self) {
+        if let Backend::Drm(backend) = &mut self.backend {
+            backend.discard_session_frame();
+        }
         // Queueing has no effects, so there is nothing to carry out.
         self.pacer = self.pacer.clone().step(Event::QueueRedraw).0;
     }
@@ -189,7 +209,7 @@ impl State {
 
     /// The timers that are due, then the event-loop tail. At most one frame
     /// is rendered per call.
-    pub(crate) fn tick(&mut self, now: Duration) {
+    pub(crate) fn tick(&mut self, now: Duration, sample: &mut impl FnMut() -> Clocks) {
         self.blank_uncovered_output(now);
         // Each kind at most once: a timer armed while these run is due
         // later than `now`, and if not, the next call takes it.
@@ -197,13 +217,13 @@ impl State {
             let Some(timer) = self.timers.take_due(now) else {
                 break;
             };
-            self.pace(now, Event::TimerFired { now, timer });
+            self.pace(now, Event::TimerFired { now, timer }, sample);
         }
         if self.timers.fallback.is_some_and(|at| at <= now) {
             self.timers.fallback = None;
             self.send_overdue_frame_callbacks(now);
         }
-        self.pace(now, Event::Redraw { now });
+        self.pace(now, Event::Redraw { now }, sample);
     }
 
     fn blank_uncovered_output(&mut self, now: Duration) {
@@ -229,7 +249,7 @@ impl State {
     }
 
     /// Feeds one event to the pacer and carries out what it asks for.
-    fn pace(&mut self, now: Duration, event: Event) {
+    fn pace(&mut self, now: Duration, event: Event, sample: &mut impl FnMut() -> Clocks) {
         let (pacer, effects) = self.pacer.clone().step(event);
         self.pacer = pacer;
         for effect in effects {
@@ -241,8 +261,9 @@ impl State {
                     } else {
                         Content::Protected
                     };
-                    let outcome = self.render(content);
-                    let retry = outcome == RenderOutcome::Failed && content == Content::Protected;
+                    let (outcome, retry) = self.render(now, content, sample);
+                    let retry = retry
+                        || (outcome == RenderOutcome::Failed && content == Content::Protected);
                     if outcome == RenderOutcome::Failed {
                         // The pacer is already rendering. Its estimated vblank
                         // below will pace protected retries.
@@ -255,6 +276,7 @@ impl State {
                             outcome,
                             animations_remain: retry,
                         },
+                        sample,
                     );
                     if outcome == RenderOutcome::Submitted {
                         self.lock_event(LockEvent::FrameSubmitted(content));
@@ -269,6 +291,7 @@ impl State {
                                     time: None,
                                     sequence: self.flips,
                                 },
+                                sample,
                             );
                         }
                     }
@@ -316,43 +339,73 @@ impl State {
         }
     }
 
-    fn render(&mut self, content: Content) -> RenderOutcome {
+    fn render(
+        &mut self,
+        now: Duration,
+        content: Content,
+        sample: &mut impl FnMut() -> Clocks,
+    ) -> (RenderOutcome, bool) {
         let protected = content == Content::Protected;
         let force_full_redraw = protected
             && self
                 .session_lock
                 .as_ref()
                 .is_some_and(crate::session_lock::SessionLock::needs_cover_frame);
-        let placements = if protected { &[][..] } else { &self.placements };
+        if let Backend::Drm(backend) = &mut self.backend {
+            if !backend.ready_to_render() {
+                return (RenderOutcome::Skipped, false);
+            }
+            let placements = if protected { &[][..] } else { &self.placements };
+            match backend.prepare(&self.windows, placements, content, force_full_redraw) {
+                Ok(true) => {}
+                Ok(false) => return (RenderOutcome::NoDamage, true),
+                Err(err) => {
+                    warn!(%err, "preparing the DRM frame failed");
+                    return (RenderOutcome::Failed, false);
+                }
+            }
+        }
+
+        // REQ-LOCK-025: rendering and fence checks can outlive the clock
+        // sample used to select the scene. Check again before submission.
+        let now = self.refresh_lock_clock(now, sample);
+        if !protected && !self.session_visible() {
+            if let Backend::Drm(backend) = &mut self.backend {
+                backend.discard_prepared();
+            }
+            return (RenderOutcome::Failed, true);
+        }
+        if protected && self.timers.cover.deadline.is_some_and(|at| now >= at) {
+            return (RenderOutcome::Failed, true);
+        }
+
         let rendered = match &mut self.backend {
             Backend::Headless(backend) => {
+                let placements = if protected { &[][..] } else { &self.placements };
                 let elements = elements(backend.renderer(), &self.windows, placements);
-                backend.render_scene(&elements, background(content), force_full_redraw)
+                backend
+                    .render_scene(&elements, background(content), force_full_redraw)
+                    .map(|(damaged, states)| (damaged, states, false))
             }
-            Backend::Drm(backend) => {
-                if !backend.ready_to_render() {
-                    return RenderOutcome::Skipped;
-                }
-                backend.render(&self.windows, placements, content, force_full_redraw)
-            }
+            Backend::Drm(backend) => backend.submit(),
         };
         match rendered {
-            Ok((damaged, states)) => {
+            Ok((damaged, states, redraw_after_flip)) => {
                 self.update_primary_scanout_output(&states);
                 if damaged {
                     if !protected {
                         self.pending_feedback = Some(self.take_presentation_feedback());
                     }
-                    RenderOutcome::Submitted
+                    (RenderOutcome::Submitted, redraw_after_flip)
                 } else if force_full_redraw {
-                    RenderOutcome::Failed
+                    (RenderOutcome::Failed, false)
                 } else {
-                    RenderOutcome::NoDamage
+                    (RenderOutcome::NoDamage, false)
                 }
             }
             Err(err) => {
                 warn!(%err, "rendering the frame failed");
-                RenderOutcome::Failed
+                (RenderOutcome::Failed, false)
             }
         }
     }
@@ -363,6 +416,7 @@ impl State {
         };
         match backend.complete() {
             DrmFlip::Presented(content) => {
+                self.timers.cover.recovery_signal(now);
                 // REQ-LOCK-002 uses KMS completion even when the pacer delays client feedback.
                 self.lock_event(LockEvent::FramePresented(content));
                 self.pace(
@@ -372,9 +426,11 @@ impl State {
                         time,
                         sequence,
                     },
+                    &mut crate::read_lock_clocks,
                 );
             }
             DrmFlip::Expired => {
+                self.timers.cover.recovery_signal(now);
                 let woke = backend.wake_if_ready();
                 let ready = backend.ready_to_render();
                 if woke {
@@ -393,7 +449,7 @@ impl State {
             backend.pause();
             // Losing the seat invalidates a pending flip as lock evidence.
             // The kernel has not confirmed the output is off.
-            self.lock_event(LockEvent::FlipFailed);
+            self.lock_event(LockEvent::OutputUnavailable);
             self.reset_frame_clock();
         }
     }
@@ -407,7 +463,9 @@ impl State {
         self.discard_pending_feedback();
     }
 
-    pub(crate) fn wake_drm(&mut self) {
+    pub(crate) fn wake_drm(&mut self, now: Duration) {
+        // Input can ask a recovered device to retry after the bounded burst.
+        self.timers.cover.recovery_signal(now);
         if let Backend::Drm(backend) = &mut self.backend
             && backend.request_wake()
         {
@@ -549,5 +607,27 @@ impl State {
         if waiting {
             self.timers.fallback = Some(now.saturating_add(FRAME_CALLBACK_FALLBACK));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn req_lock_011_blanking_retries_are_bounded_and_rearm_on_recovery() {
+        let mut timer = CoverTimer::default();
+        timer.arm(Duration::ZERO);
+        let mut now = COVER_TIMEOUT;
+        for _ in 0..COVER_BLANK_ATTEMPTS {
+            assert!(timer.blank_due(now, true));
+            now += COVER_RETRY;
+        }
+        assert!(!timer.blank_due(now, true));
+        assert_eq!(timer.deadline, None);
+
+        timer.recovery_signal(now);
+        assert!(!timer.blank_due(now, true));
+        assert!(timer.blank_due(now + COVER_RETRY, true));
     }
 }

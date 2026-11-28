@@ -97,11 +97,24 @@ with subtest("missing KMS completion turns the output off within the lock budget
     assert machine.succeed("cat /sys/class/drm/card*-Virtual-*/enabled").strip() == "disabled"
     machine.fail(f"test -e {control}/challenge-5")
     signal("resume-kms")
-    machine.send_key("a")
     wait_challenge(5)
     verify_frame("fallback-woke-covered", covered=True)
     signal("answer-5")
     verify_frame("fallback-unlocked", covered=False)
+
+with subtest("seat loss invalidates an open verdict before the next cover"):
+    signal("vt-lock")
+    wait_challenge(6)
+    signal("vt-switch")
+    machine.succeed("chvt 2")
+    wait_marker("vt-fenced")
+    signal("answer-6")
+    machine.fail(f"test -e {control}/challenge-7")
+    machine.succeed("chvt 1")
+    wait_challenge(7)
+    verify_frame("seat-return-covered", covered=True)
+    signal("answer-7")
+    verify_frame("seat-return-unlocked", covered=False)
 
 with subtest("broker disconnect restores the cover"):
     signal("close-broker")

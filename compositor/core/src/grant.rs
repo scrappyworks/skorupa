@@ -20,7 +20,7 @@
 use core::time::Duration;
 use std::collections::VecDeque;
 
-use crate::lock::{Clocks, InstanceId, LockView, SleepWatch};
+use crate::lock::{ClockChange, Clocks, InstanceId, LockView, SleepWatch};
 
 /// Most grants that can be live at once. A full table denies.
 pub const MAX_GRANTS: usize = 16;
@@ -516,12 +516,14 @@ impl State {
 /// REQ-GRANT-006, REQ-LOCK-021, REQ-LOCK-025: what the clocks and the lock
 /// state end is ended first, so no event is judged against a stale table.
 #[must_use]
-pub fn step(mut state: State, input: Input) -> (State, Vec<Effect>) {
-    let Input { now, lock, .. } = input;
+pub fn step(mut state: State, mut input: Input) -> (State, Vec<Effect>) {
+    let now = input.now;
     let mut effects = Vec::new();
-    if state.watch.slept(now) {
+    if state.watch.observe(now) != ClockChange::Stable {
         state.end_all(&mut effects, Cause::Suspend);
+        input.lock.unlocked = false;
     }
+    let lock = input.lock;
     if !lock.unlocked {
         state.end_all(&mut effects, Cause::Lock);
     }

@@ -347,6 +347,16 @@ type Ending = fn(&mut Rig) -> Event;
 /// REQ-GRANT-006: lock, suspend, restart, window gone, expiry and a failed
 /// broker each end a live stream. REQ-LOCK-021 is the first of them.
 #[test]
+fn req_grant_006_uncertain_clock_revokes_before_use() {
+    let mut rig = Rig::v1();
+    let grant = rig.grant(STREAM);
+    let before = rig.now.monotonic;
+    rig.now = Clocks::bracketed(before, before, before + 2 * THRESHOLD);
+    assert!(!rig.deliver(&grant));
+    assert_eq!(rig.state.next_expiry(), None);
+}
+
+#[test]
 fn req_grant_006_each_ending_closes_a_live_stream() {
     let endings: [(Cause, Ending); 5] = [
         (Cause::Lock, |_| Event::Lock),

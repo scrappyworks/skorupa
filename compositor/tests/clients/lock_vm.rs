@@ -76,6 +76,7 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         jump_threshold: Duration::from_secs(1),
     };
     compositor.enable_session_lock(config, read_lock_clocks(), private_channel)?;
+    let startup_token = compositor.sleep_hold_token().ok_or("no startup hold")?;
 
     let listener = ListeningSocketSource::new_auto()?;
     handle.insert_source(listener, |stream, (), compositor| {
@@ -90,7 +91,7 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
     )?;
 
     // Submit the startup cover before the loop can deliver its KMS event.
-    compositor.dispatch_at(read_lock_clocks())?;
+    compositor.dispatch(read_lock_clocks().monotonic)?;
     if compositor.session_phase() != Some(Phase::Locking) {
         return Err("lock acknowledged before dispatching the KMS completion".into());
     }
@@ -99,13 +100,13 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
     let mut startup_released = false;
     let mut relocked = false;
     let mut loss_tested = false;
+    let mut vt_locked = false;
+    let mut vt_paused = false;
     let mut disconnect_marked = false;
     loop {
         let now = read_lock_clocks();
         if !startup_released && control.join("bridge-awake").try_exists()? {
-            let token = compositor.sleep_hold_token().ok_or("no startup hold")?;
-            compositor.end_sleep_hold(now, token);
-            startup_released = true;
+            startup_released = compositor.end_sleep_hold(now, startup_token);
         }
         if !relocked && control.join("lock").try_exists()? {
             if compositor.session_phase() != Some(Phase::Unlocked) {
@@ -115,16 +116,27 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
             relocked = true;
         }
         if !loss_tested && control.join("delay-kms").try_exists()? {
-            lock_without_kms(&mut compositor, control)?;
+            lock_without_kms(&mut compositor, &mut event_loop, control)?;
             loss_tested = true;
             continue;
+        }
+        if !vt_locked && control.join("vt-lock").try_exists()? {
+            compositor.request_lock(now);
+            vt_locked = true;
+        }
+        if !vt_paused
+            && control.join("vt-switch").try_exists()?
+            && compositor.session_phase() == Some(Phase::Locking)
+        {
+            fs::write(control.join("vt-fenced"), [])?;
+            vt_paused = true;
         }
         if let Some((ui, ready)) = compositor.pending_lock_ui()
             && now.monotonic >= ready
         {
             compositor.open_lock_attempt(now, ui);
         }
-        compositor.dispatch_at(now)?;
+        compositor.dispatch(now.monotonic)?;
 
         if !startup_marked && compositor.session_phase() == Some(Phase::Locked) {
             fs::write(control.join("startup-covered"), [])?;
@@ -145,24 +157,50 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn lock_without_kms(compositor: &mut Compositor, control: &Path) -> Result<(), Box<dyn Error>> {
+fn lock_without_kms(
+    compositor: &mut Compositor,
+    event_loop: &mut EventLoop<'_, Compositor>,
+    control: &Path,
+) -> Result<(), Box<dyn Error>> {
     let now = read_lock_clocks();
     compositor.request_lock(now);
     // Stop reading KMS events while the compositor still services its timers.
-    let end = now.monotonic + Duration::from_millis(850);
+    let end = now.monotonic + Duration::from_secs(1);
     loop {
-        let now = read_lock_clocks();
-        compositor.dispatch_at(now)?;
-        if now.monotonic >= end {
+        compositor.dispatch(read_lock_clocks().monotonic)?;
+        if read_lock_clocks().monotonic > end {
+            return Err("DRM output remained enabled past the lock budget".into());
+        }
+        if compositor.session_phase() == Some(Phase::Locked) {
             break;
         }
         thread::sleep(CONTROL_POLL);
     }
-    if compositor.session_phase() != Some(Phase::Locked) || compositor.pending_lock_ui().is_some() {
-        return Err("lock did not reach the dark fallback with KMS completion withheld".into());
-    }
+    expect_lock(compositor, Phase::Locked)?;
     fs::write(control.join("fallback-dark"), [])?;
-    Ok(wait_for_marker(&control.join("resume-kms"))?)
+    wait_for_marker(&control.join("resume-kms"))?;
+
+    // Queue the wake while the old completion is still held by the notifier.
+    compositor.key_at(38, true, read_lock_clocks());
+    expect_lock(compositor, Phase::Locked)?;
+    for _ in 0..100 {
+        event_loop.dispatch(Some(CONTROL_POLL), compositor)?;
+        if compositor.session_phase() == Some(Phase::Locking) {
+            expect_lock(compositor, Phase::Locking)?;
+            // Submit the new cover without dispatching its completion yet.
+            compositor.dispatch(read_lock_clocks().monotonic)?;
+            return expect_lock(compositor, Phase::Locking);
+        }
+        expect_lock(compositor, Phase::Locked)?;
+    }
+    Err("the delayed KMS completion did not release its slot".into())
+}
+
+fn expect_lock(compositor: &Compositor, phase: Phase) -> Result<(), Box<dyn Error>> {
+    if compositor.session_phase() != Some(phase) || compositor.pending_lock_ui().is_some() {
+        return Err(format!("expected {phase:?} with authentication fenced").into());
+    }
+    Ok(())
 }
 
 fn run_broker(control: &Path) -> Result<(), Box<dyn Error>> {
@@ -170,7 +208,7 @@ fn run_broker(control: &Path) -> Result<(), Box<dyn Error>> {
     let mut output = io::stdout().lock();
     let mut previous_grant = None;
 
-    for number in 1..=5 {
+    for number in 1..=7 {
         let challenge = read_challenge(&mut input)?;
         fs::write(control.join(format!("challenge-{number}")), [])?;
         wait_for_marker(&control.join(format!("answer-{number}")))?;

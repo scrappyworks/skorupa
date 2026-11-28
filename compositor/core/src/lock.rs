@@ -109,7 +109,7 @@ pub struct SleepWatch {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ClockChange {
+pub(crate) enum ClockChange {
     Stable,
     Ambiguous,
     Resumed,
@@ -133,7 +133,7 @@ impl SleepWatch {
         self.observe(now) == ClockChange::Resumed
     }
 
-    fn observe(&mut self, now: Clocks) -> ClockChange {
+    pub(crate) fn observe(&mut self, now: Clocks) -> ClockChange {
         let (least, most) = now.sleep_bounds();
         let (old_least, old_most) = self.asleep;
         if least.saturating_sub(old_most) > self.threshold
@@ -271,6 +271,8 @@ pub enum Event {
     RenderFailed,
     /// The page flip of the submitted frame failed.
     FlipFailed,
+    /// The compositor lost its seat. The physical output state is unknown.
+    OutputUnavailable,
     /// The kernel confirmed that the only output is off or gone.
     OutputOff,
     /// An output is about to be driven again. Sent before its first frame is
@@ -364,6 +366,13 @@ enum Flight {
     Unverified,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Output {
+    On,
+    Off,
+    Unavailable,
+}
+
 /// The `lock/ui` process. It runs exactly while an attempt could be opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ui {
@@ -390,7 +399,7 @@ pub struct State {
     sleep_request: Option<u64>,
     /// Nonce answered last, so that a repeated request is answered once.
     answered: Option<u64>,
-    output_on: bool,
+    output: Output,
     flight: Flight,
     ui: Ui,
     ui_serial: u32,
@@ -415,7 +424,7 @@ impl State {
             hold_generation: 0,
             sleep_request: None,
             answered: None,
-            output_on: true,
+            output: Output::On,
             flight: Flight::Idle,
             ui: Ui::Stopped,
             ui_serial: 0,
@@ -496,7 +505,7 @@ impl State {
             Effect::ScheduleFrame,
         ]);
         // REQ-LOCK-010: nothing is visible, so no flip has to be awaited.
-        if acknowledge_dark && !self.output_on {
+        if acknowledge_dark && self.output == Output::Off {
             self.acknowledge(effects);
         }
     }
@@ -559,7 +568,7 @@ impl State {
     /// Runs `lock/ui` exactly while an attempt could be opened: `Locked` and
     /// not in the sleep hold. REQ-TRUST-002: every start is a new process.
     fn sync_ui(&mut self, effects: &mut Vec<Effect>) {
-        if self.phase != Phase::Locked || self.hold || !self.output_on {
+        if self.phase != Phase::Locked || self.hold || self.output != Output::On {
             self.drop_ui(true, effects);
         } else if self.ui == Ui::Stopped {
             // Serials only tell a process from the ones around it.
@@ -591,6 +600,17 @@ impl State {
         if self.phase != Phase::Unlocked {
             effects.push(Effect::ScheduleFrame);
         }
+    }
+
+    fn output_available(&mut self, effects: &mut Vec<Effect>) {
+        if self.output != Output::On {
+            self.flight = Flight::Idle;
+            if self.phase == Phase::Locked {
+                self.phase = Phase::Locking;
+            }
+            self.output = Output::On;
+        }
+        self.redraw(effects);
     }
 
     fn handle(&mut self, input: Input, effects: &mut Vec<Effect>) {
@@ -626,7 +646,9 @@ impl State {
             }
             Event::FramePresented(content) => {
                 // REQ-LOCK-002: the tag recorded at submission decides.
-                let covered = self.flight == Flight::Protected && content == Content::Protected;
+                let covered = self.output == Output::On
+                    && self.flight == Flight::Protected
+                    && content == Content::Protected;
                 self.flight = Flight::Idle;
                 if !covered {
                     self.redraw(effects);
@@ -641,8 +663,14 @@ impl State {
                 self.flight = Flight::Idle;
                 self.redraw(effects);
             }
+            Event::OutputUnavailable => {
+                self.output = Output::Unavailable;
+                if self.phase != Phase::Unlocked {
+                    self.require_fresh_cover(effects);
+                }
+            }
             Event::OutputOff => {
-                self.output_on = false;
+                self.output = Output::Off;
                 self.flight = Flight::Idle;
                 if self.phase == Phase::Locking {
                     self.acknowledge(effects);
@@ -650,14 +678,7 @@ impl State {
                     self.sync_ui(effects);
                 }
             }
-            Event::OutputOn => {
-                if !self.output_on && self.phase == Phase::Locked {
-                    self.phase = Phase::Locking;
-                    self.flight = Flight::Idle;
-                }
-                self.output_on = true;
-                self.redraw(effects);
-            }
+            Event::OutputOn => self.output_available(effects),
             Event::UiConnected { ui } => {
                 if ui == self.ui_serial && self.ui == Ui::Starting {
                     self.ui = Ui::Connected;
@@ -702,7 +723,7 @@ impl State {
     fn judge(&mut self, binding: Binding, outcome: Outcome, effects: &mut Vec<Effect>) {
         // The last epoch can never be followed by a new one, so it must not end.
         let open = self.phase == Phase::Locked
-            && self.output_on
+            && self.output == Output::On
             && !self.hold
             && matches!(self.ui, Ui::Checking { .. })
             && self.epoch < u64::MAX;
@@ -796,10 +817,11 @@ fn audit(
     let reacknowledged = !stable && input.event == Event::OutputOff;
     let locked = (before.phase != Phase::Locked || reacknowledged) && after.phase == Phase::Locked;
     let shown = before.phase == Phase::Locking
+        && before.output == Output::On
         && before.flight == Flight::Protected
         && input.event == Event::FramePresented(Content::Protected)
         && stable;
-    let dark = !before.output_on || input.event == Event::OutputOff;
+    let dark = before.output == Output::Off || input.event == Event::OutputOff;
     if locked != has(|effect| matches!(effect, Effect::LockAcknowledged { .. }))
         || (locked && !shown && !dark)
     {
@@ -811,7 +833,9 @@ fn audit(
     if after.epoch < before.epoch || (relocked != fresh && before.epoch != u64::MAX) {
         return Err("epoch reused or skipped");
     }
-    if after.ui != Ui::Stopped && (after.phase != Phase::Locked || after.hold || !after.output_on) {
+    if after.ui != Ui::Stopped
+        && (after.phase != Phase::Locked || after.hold || after.output != Output::On)
+    {
         return Err("lock/ui runs while no attempt may open");
     }
     if after.sleep_request.is_some() && after.phase != Phase::Locking {

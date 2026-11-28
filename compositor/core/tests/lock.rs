@@ -276,6 +276,26 @@ fn req_lock_007_every_lock_gets_the_next_epoch() {
 }
 
 #[test]
+fn req_lock_010_seat_loss_voids_the_open_attempt_until_a_fresh_cover() {
+    let mut rig = Rig::locked();
+    let old = rig.open_attempt();
+    let effects = rig.send(Event::OutputUnavailable);
+    assert_eq!(rig.state.phase(), Phase::Locking);
+    assert!(!acknowledged(&effects));
+    assert!(effects.contains(&Effect::StopUi { ui: rig.ui }));
+    assert!(!acknowledged(&rig.present(Content::Protected)));
+    rig.send(Event::OutputOn);
+    rig.verdict(old, Outcome::Granted);
+    assert_eq!(rig.state.phase(), Phase::Locking);
+    assert!(acknowledged(&rig.present(Content::Protected)));
+    let current = rig.open_attempt();
+    rig.verdict(old, Outcome::Granted);
+    assert_eq!(rig.state.phase(), Phase::Locked);
+    rig.verdict(current, Outcome::Granted);
+    assert_eq!(rig.state.phase(), Phase::Unlocked);
+}
+
+#[test]
 fn req_lock_010_output_off_acknowledges_without_a_flip() {
     let mut rig = Rig::unlocked();
     rig.send(Event::LockRequested);

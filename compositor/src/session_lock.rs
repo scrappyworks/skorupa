@@ -123,9 +123,27 @@ impl SessionLock {
 
 impl State {
     pub(crate) fn lock_clock(&mut self, now: Clocks) {
+        self.lock_event_at(now, Event::Tick);
+    }
+
+    pub(crate) fn lock_event_at(&mut self, now: Clocks, event: Event) {
         if let Some(session) = &mut self.session_lock {
             session.now = now;
-            self.lock_event(Event::Tick);
+            self.lock_event(event);
+        }
+    }
+
+    pub(crate) fn refresh_lock_clock(
+        &mut self,
+        now: Duration,
+        sample: &mut impl FnMut() -> Clocks,
+    ) -> Duration {
+        if self.session_lock.is_some() {
+            let clocks = sample();
+            self.lock_clock(clocks);
+            clocks.monotonic
+        } else {
+            now
         }
     }
 
@@ -145,7 +163,14 @@ impl State {
             match effect {
                 Effect::RouteInput(mode) => self.set_session_visible(mode == InputMode::Session),
                 Effect::ShowFallback => self.set_session_visible(false),
-                Effect::ScheduleFrame | Effect::Unlock { .. } => self.queue_redraw(),
+                Effect::ScheduleFrame => {
+                    if session.needs_cover_frame() {
+                        let now = session.now.monotonic;
+                        self.arm_cover_deadline(now);
+                    }
+                    self.queue_redraw();
+                }
+                Effect::Unlock { .. } => self.queue_redraw(),
                 Effect::StartUi { ui, delay } => {
                     session.pending_ui = session
                         .authd
@@ -190,7 +215,7 @@ impl State {
         }
     }
 
-    pub(crate) fn receive_verdict(&mut self) {
+    pub(crate) fn receive_verdict(&mut self, sample: &mut impl FnMut() -> Clocks) {
         let Some(authd) = self
             .session_lock
             .as_mut()
@@ -199,7 +224,7 @@ impl State {
             return;
         };
         match authd.receive() {
-            Ok(Some(verdict)) => self.lock_event(verdict_event(verdict)),
+            Ok(Some(verdict)) => self.lock_event_at(sample(), verdict_event(verdict)),
             Ok(None) => {}
             Err(_) => self.disconnect_authd(),
         }
@@ -317,6 +342,83 @@ fn authd_disconnected() -> Error {
 mod tests {
     use super::*;
     use std::net::Shutdown;
+
+    use crate::{Compositor, Config};
+
+    const BOOT: Duration = Duration::from_secs(100);
+
+    fn covered() -> (Compositor, UnixStream) {
+        let (socket, peer) = UnixStream::pair().unwrap();
+        let mut compositor = Compositor::new(Config::default()).unwrap();
+        let mut session = [0; SessionId::MAX_LEN];
+        session[..2].copy_from_slice(b"c2");
+        let now = Clocks::exact(BOOT, BOOT);
+        compositor
+            .enable_session_lock(
+                lock::Config {
+                    instance: lock::InstanceId([3; 16]),
+                    session: lock::SessionId(session),
+                    jump_threshold: Duration::from_secs(1),
+                },
+                now,
+                socket,
+            )
+            .unwrap();
+        compositor.dispatch_at(now).unwrap();
+        (compositor, peer)
+    }
+
+    fn queue_grant(compositor: &mut Compositor, peer: &mut UnixStream) {
+        let now = Clocks::exact(BOOT, BOOT);
+        assert!(compositor.end_sleep_hold(now, compositor.sleep_hold_token().unwrap()));
+        let (ui, _) = compositor.pending_lock_ui().unwrap();
+        compositor.open_lock_attempt(now, ui);
+        write_message(peer, Message::Verdict(verdict()));
+    }
+
+    #[test]
+    fn req_lock_026_bridge_retries_a_report_deferred_by_ambiguous_clocks() {
+        let (mut compositor, _peer) = covered();
+        let token = compositor.sleep_hold_token().unwrap();
+        let later = BOOT + Duration::from_secs(2);
+        let ambiguous = Clocks::bracketed(BOOT, BOOT, later);
+        assert!(!compositor.end_sleep_hold(ambiguous, token));
+        assert_eq!(compositor.sleep_hold_token(), Some(token));
+        assert!(compositor.end_sleep_hold(Clocks::exact(later, later), token));
+    }
+
+    #[test]
+    fn req_lock_025_resamples_after_receiving_the_verdict() {
+        let (mut compositor, mut peer) = covered();
+        queue_grant(&mut compositor, &mut peer);
+        let now = BOOT + Duration::from_secs(1);
+        let resumed = Clocks::exact(now, now + Duration::from_secs(60));
+        let mut samples = [Clocks::exact(now, now)].into_iter();
+        compositor
+            .dispatch_with_clock(now, &mut || samples.next().unwrap_or(resumed))
+            .unwrap();
+        assert_ne!(compositor.session_phase(), Some(lock::Phase::Unlocked));
+    }
+
+    #[test]
+    fn req_lock_025_resamples_before_submitting_the_session_frame() {
+        let (mut compositor, mut peer) = covered();
+        queue_grant(&mut compositor, &mut peer);
+        let now = BOOT + Duration::from_secs(1);
+        compositor.dispatch_at(Clocks::exact(now, now)).unwrap();
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Unlocked));
+
+        let now = now + Duration::from_secs(1);
+        let resumed = Clocks::exact(now, now + Duration::from_secs(60));
+        let mut samples = [Clocks::exact(now, now); 2].into_iter();
+        compositor.state.queue_redraw();
+        let flips = compositor.state.flips;
+        compositor
+            .dispatch_with_clock(now, &mut || samples.next().unwrap_or(resumed))
+            .unwrap();
+        assert_eq!(compositor.state.flips, flips);
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Locking));
+    }
 
     fn verdict() -> Verdict {
         Verdict {

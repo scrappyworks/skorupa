@@ -504,7 +504,7 @@ fn req_auth_001_only_a_current_private_verdict_restores_the_session() {
 
     let now = lock_clocks(fixture.now);
     let token = fixture.compositor.sleep_hold_token().unwrap();
-    fixture.compositor.end_sleep_hold(now, token);
+    assert!(fixture.compositor.end_sleep_hold(now, token));
     let challenge = open_attempt(&mut fixture, &mut peer);
     send_verdict(
         &mut peer,

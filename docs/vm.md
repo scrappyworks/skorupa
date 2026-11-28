@@ -45,11 +45,16 @@ user permission to take the delay inhibitor.
 The lock guest uses the DRM compositor with a scripted broker attached through
 an inherited socket pair. It checks the pixels on the guest output, input
 delivery to ordinary Wayland windows, and the effect of denials, stale verdicts,
-current grants and a broker disconnect. A fault probe withholds the KMS event,
-checks that the guest connector is disabled, then releases the delayed event
-and sends a key. Authentication resumes after a new cover reaches the output.
-A completion that never arrives keeps the output dark until the DRM session
-is recreated.
+current grants and a broker disconnect. A fault probe measures the lock budget
+in the guest and checks the disabled connector in sysfs. A key requests wake
+before the probe releases the old completion. Authentication remains fenced
+until a separate completion for the fresh cover. A VT switch also checks that
+a verdict opened before seat loss cannot restore the session.
+
+A permanently missing completion keeps a successfully disabled output dark
+until the DRM session is recreated. After failed blanking attempts, input or
+DRM progress can rearm the bounded retry. The deadline relies on a responsive
+kernel and renderer.
 
 The broker and simulated logind bridge notification belong to the test fixture.
 The trusted lock surface, PAM, the production session launcher and physical

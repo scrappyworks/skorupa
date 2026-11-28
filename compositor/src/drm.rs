@@ -19,6 +19,7 @@ use smithay::backend::renderer::element::RenderElementStates;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiRenderer, gbm::GbmGlesBackend};
+use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier};
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu};
@@ -47,6 +48,20 @@ pub(crate) struct Drm {
     active: bool,
     pending_flip: Option<PendingFlip>,
     power: OutputPower,
+    prepared: Option<PreparedFrame>,
+}
+
+struct PreparedFrame {
+    content: Content,
+    damaged: bool,
+    states: RenderElementStates,
+    fence: Option<SyncPoint>,
+}
+
+impl PreparedFrame {
+    fn ready(&self) -> bool {
+        self.fence.as_ref().is_none_or(SyncPoint::is_reached)
+    }
 }
 
 enum PendingFlip {
@@ -194,11 +209,7 @@ impl Drm {
             .map_err(|err| err.to_string())?;
         drop(renderer);
 
-        let mut input =
-            Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.into());
-        input
-            .udev_assign_seat(&seat)
-            .map_err(|()| "libinput could not assign the seat")?;
+        let devices = Devices::new(session, notifier, drm_notifier, &seat, crtc)?;
         let drm = Self {
             manager,
             surface,
@@ -207,12 +218,7 @@ impl Drm {
             active: true,
             pending_flip: None,
             power: OutputPower::On,
-        };
-        let devices = Devices {
-            session: notifier,
-            drm: drm_notifier,
-            input,
-            crtc,
+            prepared: None,
         };
         Ok((drm, devices, output, config))
     }
@@ -225,13 +231,19 @@ impl Drm {
         Ok(renderer.shm_formats().collect())
     }
 
-    pub(crate) fn render(
+    pub(crate) fn prepare(
         &mut self,
         windows: &[crate::state::Window],
         placements: &[frame::Placement],
         content: Content,
         force_full_redraw: bool,
-    ) -> Result<(bool, RenderElementStates), Box<dyn Error>> {
+    ) -> Result<bool, Box<dyn Error>> {
+        if let Some(frame) = &self.prepared
+            && frame.content == content
+        {
+            return Ok(frame.ready());
+        }
+        self.prepared = None;
         if force_full_redraw {
             self.surface
                 .with_compositor(DrmCompositor::reset_buffer_ages);
@@ -250,18 +262,52 @@ impl Drm {
                 FrameFlags::DEFAULT,
             )
             .map_err(|err| err.to_string())?;
-        if frame.needs_sync()
-            && let PrimaryPlaneElement::Swapchain(element) = &frame.primary_element
+        let fence = match &frame.primary_element {
+            PrimaryPlaneElement::Swapchain(element)
+                if !frame.is_empty
+                    && (content == Content::Protected || frame.needs_sync())
+                    && !element.sync.is_reached() =>
+            {
+                Some(element.sync.clone())
+            }
+            _ => None,
+        };
+        // A modeset can block on an input fence even when KMS accepts it.
+        // Keep one frame while the fence is pending so the cover timer can run.
+        let ready = fence.is_none();
+        self.prepared = Some(PreparedFrame {
+            content,
+            damaged: !frame.is_empty,
+            states: frame.states,
+            fence,
+        });
+        Ok(ready)
+    }
+
+    pub(crate) fn discard_prepared(&mut self) {
+        self.prepared = None;
+    }
+
+    pub(crate) fn discard_session_frame(&mut self) {
+        // A later client commit must keep its own presentation feedback.
+        if self
+            .prepared
+            .as_ref()
+            .is_some_and(|frame| frame.content == Content::Session)
         {
-            element.sync.wait()?;
+            self.discard_prepared();
         }
-        if !frame.is_empty {
+    }
+
+    pub(crate) fn submit(&mut self) -> Result<(bool, RenderElementStates, bool), Box<dyn Error>> {
+        let frame = self.prepared.take().ok_or("no prepared DRM frame")?;
+        if frame.damaged {
             self.surface
-                .queue_frame(content)
+                .queue_frame(frame.content)
                 .map_err(|err| err.to_string())?;
             self.pending_flip = Some(PendingFlip::Awaited);
         }
-        Ok((!frame.is_empty, frame.states))
+        Ok((frame.damaged, frame.states, frame.fence.is_some()))
     }
 
     pub(crate) fn ready_to_render(&self) -> bool {
@@ -275,6 +321,7 @@ impl Drm {
 
     pub(crate) fn blank(&mut self) -> Result<(), smithay::backend::drm::DrmError> {
         self.surface.with_compositor(DrmCompositor::clear)?;
+        self.discard_prepared();
         // clear retires the frame in Smithay. A queued event can still arrive
         // on this descriptor, so reserve its slot until the notifier drains it.
         if self.pending_flip.is_some() {
@@ -329,6 +376,7 @@ impl Drm {
 
     pub(crate) fn pause(&mut self) {
         self.active = false;
+        self.discard_prepared();
         self.expire_flip();
         self.manager.pause();
     }
@@ -346,6 +394,27 @@ impl Drm {
 }
 
 impl Devices {
+    fn new(
+        seat_session: LibSeatSession,
+        session: LibSeatSessionNotifier,
+        drm: DrmDeviceNotifier,
+        seat: &str,
+        crtc: crtc::Handle,
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut input = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
+            seat_session.into(),
+        );
+        input
+            .udev_assign_seat(seat)
+            .map_err(|()| "libinput could not assign the seat")?;
+        Ok(Self {
+            session,
+            drm,
+            input,
+            crtc,
+        })
+    }
+
     pub(crate) fn register(
         self,
         handle: &LoopHandle<'_, Compositor>,
@@ -403,5 +472,51 @@ impl Devices {
             DrmEvent::Error(err) => tracing::warn!(%err, "DRM event failed"),
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::OwnedFd;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use smithay::backend::renderer::sync::{Fence, Interrupted};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestFence(Arc<AtomicBool>);
+
+    impl Fence for TestFence {
+        fn is_signaled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+
+        fn wait(&self) -> Result<(), Interrupted> {
+            panic!("the event loop must poll a pending fence")
+        }
+
+        fn is_exportable(&self) -> bool {
+            false
+        }
+
+        fn export(&self) -> Option<OwnedFd> {
+            None
+        }
+    }
+
+    #[test]
+    fn req_lock_011_prepared_cover_polls_its_fence_without_waiting() {
+        let signaled = Arc::new(AtomicBool::new(false));
+        let frame = PreparedFrame {
+            content: Content::Protected,
+            damaged: true,
+            states: RenderElementStates::default(),
+            fence: Some(SyncPoint::from(TestFence(signaled.clone()))),
+        };
+        assert!(!frame.ready());
+        signaled.store(true, Ordering::Relaxed);
+        assert!(frame.ready());
     }
 }

@@ -103,9 +103,13 @@ impl Compositor {
     }
 
     /// Relays a trusted bridge's report that it has rearmed its inhibitor.
-    pub fn end_sleep_hold(&mut self, now: Clocks, token: lock::HoldToken) {
-        self.state.lock_clock(now);
-        self.state.lock_event(lock::Event::SleepOver { token });
+    /// Returns whether the reported hold is over. If it is still current,
+    /// the bridge can retry with a fresh clock sample.
+    #[must_use]
+    pub fn end_sleep_hold(&mut self, now: Clocks, token: lock::HoldToken) -> bool {
+        self.state
+            .lock_event_at(now, lock::Event::SleepOver { token });
+        self.sleep_hold_token().is_none()
     }
 
     /// The prompt serial and earliest monotonic time for its trusted adapter.
@@ -126,7 +130,7 @@ impl Compositor {
     }
 
     /// The event loop can poll this descriptor for a verdict or a disconnect.
-    /// [`Self::dispatch_at`] owns reads from it.
+    /// [`Self::dispatch`] owns reads from it.
     #[must_use]
     pub fn authd_fd(&self) -> Option<BorrowedFd<'_>> {
         self.state
@@ -156,10 +160,7 @@ impl Compositor {
     /// When reading from or writing to the clients fails as a whole; a
     /// single broken client is disconnected instead.
     pub fn dispatch(&mut self, now: Duration) -> Result<(), Box<dyn Error>> {
-        if self.state.session_lock.is_some() {
-            return self.dispatch_at(read_lock_clocks());
-        }
-        self.dispatch_wayland(now)
+        self.dispatch_with_clock(now, &mut read_lock_clocks)
     }
 
     /// Dispatches clients, authentication and presentation with supplied clocks.
@@ -167,14 +168,19 @@ impl Compositor {
     /// # Errors
     /// When the display fails to dispatch or flush clients.
     pub fn dispatch_at(&mut self, now: Clocks) -> Result<(), Box<dyn Error>> {
-        self.state.lock_clock(now);
-        self.state.receive_verdict();
-        self.dispatch_wayland(now.monotonic)
+        self.dispatch_with_clock(now.monotonic, &mut || now)
     }
 
-    fn dispatch_wayland(&mut self, now: Duration) -> Result<(), Box<dyn Error>> {
+    fn dispatch_with_clock(
+        &mut self,
+        now: Duration,
+        sample: &mut impl FnMut() -> Clocks,
+    ) -> Result<(), Box<dyn Error>> {
+        self.state.refresh_lock_clock(now, sample);
+        self.state.receive_verdict(sample);
         self.display.dispatch_clients(&mut self.state)?;
-        self.state.tick(now);
+        let now = self.state.refresh_lock_clock(now, sample);
+        self.state.tick(now, sample);
         self.display.flush_clients()?;
         Ok(())
     }
