@@ -544,10 +544,11 @@ impl Devices {
             }
         })?;
 
+        let mut vblank = CrtcSequence::default();
         handle.insert_source(drm, move |event, metadata, compositor| match event {
             DrmEvent::VBlank(event_crtc) if event_crtc == crtc => {
                 let time = presentation_sample(interface, metadata.as_ref().map(|m| m.time));
-                let sequence = metadata.as_ref().map_or(0, |metadata| metadata.sequence);
+                let sequence = vblank.observe(metadata.as_ref().map(|m| m.sequence));
                 let clocks = read_lock_clocks();
                 compositor.state.lock_clock(clocks);
                 compositor
@@ -558,6 +559,29 @@ impl Devices {
             DrmEvent::Error(err) => tracing::warn!(%err, "DRM event failed"),
         })?;
         Ok(())
+    }
+}
+
+/// Legacy DRM page-flip events carry the low 32 bits of the kernel's vblank
+/// count. Track wraps in event order for this CRTC. Wraps before startup or
+/// between observations a full counter period apart cannot be recovered.
+#[derive(Default)]
+struct CrtcSequence {
+    last: u32,
+    wraps: u32,
+}
+
+impl CrtcSequence {
+    fn observe(&mut self, sequence: Option<u32>) -> u64 {
+        let Some(sequence) = sequence else {
+            // The presentation protocol reserves zero for an unknown count.
+            return 0;
+        };
+        if sequence < self.last {
+            self.wraps = self.wraps.wrapping_add(1);
+        }
+        self.last = sequence;
+        (u64::from(self.wraps) << u32::BITS) | u64::from(sequence)
     }
 }
 

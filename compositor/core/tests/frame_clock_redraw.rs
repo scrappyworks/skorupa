@@ -103,7 +103,7 @@ impl Harness {
         })
     }
 
-    fn flip(&mut self, now: Duration, time: Option<Duration>, sequence: u32) -> Vec<Effect> {
+    fn flip(&mut self, now: Duration, time: Option<Duration>, sequence: u64) -> Vec<Effect> {
         self.send(Event::FlipCompleted {
             now,
             time,
@@ -461,11 +461,11 @@ fn steady_state(refresh: Duration) {
         let now = flip_time.saturating_sub(early);
         // The client answered the frame callback sent at submission.
         output.send(Event::QueueRedraw);
-        let effects = output.flip(now, Some(flip_time), frame);
+        let effects = output.flip(now, Some(flip_time), u64::from(frame));
         assert!(effects.contains(&Effect::Presented {
             time: flip_time,
             refresh: Some(refresh),
-            sequence: frame,
+            sequence: u64::from(frame),
             hw_clock: true
         }));
         assert_eq!(output.render(now), flip_time + refresh);
@@ -545,7 +545,7 @@ fn req_perf_012_held_flip_is_reported_without_a_hardware_timestamp() {
     output.rendered(ms(11), RenderOutcome::Submitted);
     // The flip did complete, so the watchdog has nothing left to guard.
     assert_eq!(
-        output.flip(ms(11), Some(ms(11)), 0),
+        output.flip(ms(11), Some(ms(11)), 1 << 32),
         [
             Effect::CancelTimer(Timer::FlipWatchdog),
             Effect::ArmTimer {
@@ -566,7 +566,7 @@ fn req_perf_012_held_flip_is_reported_without_a_hardware_timestamp() {
             Effect::Presented {
                 time: ms(10) + HZ_60,
                 refresh: Some(HZ_60),
-                sequence: 0,
+                sequence: 1 << 32,
                 hw_clock: false
             },
             callbacks(2),
@@ -687,7 +687,7 @@ enum Op {
     Queue,
     Redraw,
     Rendered(RenderOutcome, bool),
-    Flip(Option<i32>, u32),
+    Flip(Option<i32>, u64),
     Fire(Timer),
     Stale(Timer),
 }
@@ -708,7 +708,7 @@ fn op() -> impl Strategy<Value = Op> {
         3 => Just(Op::Queue),
         3 => Just(Op::Redraw),
         3 => (outcome, any::<bool>()).prop_map(|(outcome, more)| Op::Rendered(outcome, more)),
-        3 => (proptest::option::of(-40_000_000..40_000_000_i32), any::<u32>())
+        3 => (proptest::option::of(-40_000_000..40_000_000_i32), any::<u64>())
             .prop_map(|(offset, sequence)| Op::Flip(offset, sequence)),
         3 => timer.clone().prop_map(Op::Fire),
         1 => timer.prop_map(Op::Stale),
