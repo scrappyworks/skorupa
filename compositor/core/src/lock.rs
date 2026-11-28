@@ -717,17 +717,21 @@ impl State {
         }
     }
 
+    fn accepts_verdict(&self, binding: Binding) -> bool {
+        // The last epoch can never be followed by a new one, so it must not end.
+        self.phase == Phase::Locked
+            && self.output == Output::On
+            && !self.hold
+            && matches!(self.ui, Ui::Checking { .. })
+            && self.epoch < u64::MAX
+            && binding == self.binding()
+    }
+
     /// REQ-AUTH-001: a verdict counts only for the open attempt of this
     /// instance, session and epoch, and consumes it either way. Anything else
     /// is dropped and consumes nothing.
     fn judge(&mut self, binding: Binding, outcome: Outcome, effects: &mut Vec<Effect>) {
-        // The last epoch can never be followed by a new one, so it must not end.
-        let open = self.phase == Phase::Locked
-            && self.output == Output::On
-            && !self.hold
-            && matches!(self.ui, Ui::Checking { .. })
-            && self.epoch < u64::MAX;
-        if !open || binding != self.binding() {
+        if !self.accepts_verdict(binding) {
             return;
         }
         self.ui_failures = 0;
@@ -848,6 +852,9 @@ fn audit(
     }
     Ok(())
 }
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(test)]
 mod tests {
