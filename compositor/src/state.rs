@@ -7,11 +7,12 @@ use std::error::Error;
 use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::FramePacer;
+use skorupa_compositor_core::layout::{Effect, Event, MAX_APP_ID_LEN};
 use smithay::backend::input::{InputTime, KeyState};
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::backend::renderer::{ImportMemWl, buffer_dimensions};
 use smithay::desktop::utils::OutputPresentationFeedback;
-use smithay::input::keyboard::{FilterResult, XkbConfig};
+use smithay::input::keyboard::{FilterResult, XkbConfig, keysyms};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -31,13 +32,14 @@ use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
 use smithay::wayland::presentation::PresentationState;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+    XdgToplevelSurfaceData,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use tracing::warn;
 
 use crate::frame::Timers;
 use crate::headless::Headless;
-use crate::layout::{FillOutput, Layout, WindowId};
+use crate::layout::{Layout, WindowId, WorkspaceLayout};
 
 /// `CLOCK_MONOTONIC`: the clock that `now` and all presentation times are on.
 const PRESENTATION_CLOCK: u32 = 1;
@@ -111,6 +113,7 @@ pub struct State {
     /// What the layout last said: shown windows, bottom to top.
     pub(crate) placements: Vec<(WindowId, Rectangle<i32, Logical>)>,
     focus: Option<WindowId>,
+    workspace_keys: [Option<u32>; 9],
 
     pub(crate) pacer: FramePacer,
     pub(crate) timers: Timers,
@@ -164,9 +167,10 @@ impl State {
             backend,
             windows: Vec::new(),
             next_window_id: 0,
-            layout: Box::new(FillOutput::default()),
+            layout: Box::new(WorkspaceLayout::new(mode.size.w, mode.size.h)),
             placements: Vec::new(),
             focus: None,
+            workspace_keys: [None; 9],
             pacer: FramePacer::new(config.refresh_interval(), config.flip_timeout),
             timers: Timers::default(),
             pending_feedback: None,
@@ -188,23 +192,40 @@ impl State {
     /// Applies what the layout says: sizes and states to the clients, the
     /// keyboard to the focused window.
     fn arrange(&mut self) {
-        self.placements = self.layout.placements(self.output_size());
+        self.placements = self.layout.placements();
         let focus = self.layout.focus();
 
         for window in &self.windows {
-            let shown = self.placements.iter().find(|(id, _)| *id == window.id);
+            let configured = self.layout.configure(window.id);
+            let initial_size = window
+                .toplevel
+                .parent()
+                .is_none()
+                .then(|| self.output_size());
             window.toplevel.with_pending_state(|state| {
-                state.size = Some(shown.map_or(self.output_size(), |(_, rect)| rect.size));
-                // Edge to edge: no shadows or rounded corners to draw.
+                state.size = configured.map_or_else(
+                    || initial_size,
+                    |configured| configured.size.map(|size| (size.w, size.h).into()),
+                );
+                if configured.is_some_and(|configured| configured.fullscreen) {
+                    state.states.set(xdg_toplevel::State::Fullscreen);
+                } else {
+                    state.states.unset(xdg_toplevel::State::Fullscreen);
+                }
+                // The tiling states describe independent windows.
                 for edge in [
                     xdg_toplevel::State::TiledLeft,
                     xdg_toplevel::State::TiledRight,
                     xdg_toplevel::State::TiledTop,
                     xdg_toplevel::State::TiledBottom,
                 ] {
-                    state.states.set(edge);
+                    if state.size.is_some() {
+                        state.states.set(edge);
+                    } else {
+                        state.states.unset(edge);
+                    }
                 }
-                if focus == Some(window.id) {
+                if configured.is_some_and(|configured| configured.activated) {
                     state.states.set(xdg_toplevel::State::Activated);
                 } else {
                     state.states.unset(xdg_toplevel::State::Activated);
@@ -242,14 +263,54 @@ impl State {
             KeyState::Released
         };
         let time = InputTime::from_micros(u64::try_from(time.as_micros()).unwrap_or(u64::MAX));
-        keyboard.input::<(), _>(
+        let selected = keyboard.input(
             self,
             keycode.into(),
             state,
             SERIAL_COUNTER.next_serial(),
             time,
-            |_, _, _| FilterResult::Forward,
+            |state, modifiers, symbols| {
+                if let Some(held) = state
+                    .workspace_keys
+                    .iter_mut()
+                    .find(|held| **held == Some(keycode))
+                {
+                    if !pressed {
+                        *held = None;
+                    }
+                    return FilterResult::Intercept(None);
+                }
+
+                let symbol = symbols.modified_sym().raw();
+                if pressed
+                    && modifiers.logo
+                    && !modifiers.ctrl
+                    && !modifiers.alt
+                    && !modifiers.shift
+                    && (keysyms::KEY_1..=keysyms::KEY_9).contains(&symbol)
+                {
+                    let index = (symbol - keysyms::KEY_1) as usize;
+                    state.workspace_keys[index] = Some(keycode);
+                    FilterResult::Intercept(Some(index))
+                } else {
+                    FilterResult::Forward
+                }
+            },
         );
+        if let Some(Some(index)) = selected {
+            self.layout_event(Event::WorkspaceIndex(index));
+        }
+    }
+
+    fn layout_event(&mut self, event: Event) {
+        for effect in self.layout.handle(event) {
+            if let Effect::Close(id) = effect
+                && let Some(window) = self.windows.iter().find(|window| window.id == id)
+            {
+                window.toplevel.send_close();
+            }
+        }
+        self.arrange();
     }
 
     /// Refuses a pending buffer above the configured size before anything
@@ -305,21 +366,47 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
-        if let Some(window) = self
+        if let Some(index) = self
             .windows
-            .iter_mut()
-            .find(|window| window.toplevel.wl_surface() == surface)
+            .iter()
+            .position(|window| window.toplevel.wl_surface() == surface)
         {
+            let window = &mut self.windows[index];
             let mapped = with_renderer_surface_state(surface, |state| state.buffer().is_some())
                 .unwrap_or(false);
             if mapped != window.mapped {
                 window.mapped = mapped;
-                if mapped {
-                    self.layout.window_added(window.id);
+                let id = window.id;
+                let event = if mapped {
+                    let parent = window.toplevel.parent().and_then(|parent| {
+                        self.windows
+                            .iter()
+                            .find(|window| window.mapped && *window.toplevel.wl_surface() == parent)
+                            .map(|window| window.id)
+                    });
+                    let app_id = with_states(surface, |states| {
+                        let role = states
+                            .data_map
+                            .get::<XdgToplevelSurfaceData>()?
+                            .lock()
+                            .ok()?;
+                        role.app_id
+                            .as_ref()
+                            .filter(|id| id.len() <= MAX_APP_ID_LEN)
+                            .cloned()
+                    });
+                    // xdg_toplevel.set_parent can only name a toplevel on its own connection.
+                    Event::Map {
+                        window: id,
+                        app_id,
+                        parent,
+                        parent_same_client: parent.is_some(),
+                        valid_token: false,
+                    }
                 } else {
-                    self.layout.window_removed(window.id);
-                }
-                self.arrange();
+                    Event::Unmap(id)
+                };
+                self.layout_event(event);
                 return;
             }
             if !window.toplevel.is_initial_configure_sent() {
@@ -366,8 +453,7 @@ impl XdgShellHandler for State {
         };
         let window = self.windows.remove(index);
         if window.mapped {
-            self.layout.window_removed(window.id);
-            self.arrange();
+            self.layout_event(Event::Unmap(window.id));
         }
     }
 

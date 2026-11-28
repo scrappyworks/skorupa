@@ -113,6 +113,14 @@ impl Fixture {
         window
     }
 
+    /// Selects a workspace through the same seat input as a physical key.
+    fn select_workspace(&mut self, digit: u32) {
+        let number = 9 + digit;
+        for (key, pressed) in [(133, true), (number, true), (133, false), (number, false)] {
+            self.compositor.key(key, pressed, self.now);
+        }
+    }
+
     /// The color of the top left pixel of the last frame, without alpha.
     fn color(&mut self) -> u32 {
         let pixels = self.compositor.pixels().unwrap();
@@ -266,6 +274,7 @@ fn req_perf_014_covered_client_gets_frame_callbacks_about_a_second_apart() {
     let window = fixture.map(&mut below, RED);
     let mut above = fixture.connect();
     fixture.map(&mut above, BLUE);
+    fixture.select_workspace(2);
     fixture.advance_to(START + HZ_60);
     assert_eq!(fixture.color(), BLUE);
 
@@ -319,12 +328,17 @@ fn req_input_002_keys_reach_only_the_focused_client() {
     fixture.sync(&mut second);
     fixture.sync(&mut first);
 
-    // The newest mapped toplevel has the focus; the older one was told so.
-    assert_eq!(first.data.keys, [Key::Keymap, Key::Enter, Key::Leave]);
-    assert_eq!(second.data.keys, [Key::Keymap, Key::Enter]);
-    assert_eq!(first.data.configures.len(), 3);
-    assert!(!first.data.configures[2].activated());
-    assert!(second.data.configures[1].activated());
+    assert_eq!(first.data.keys, [Key::Keymap, Key::Enter]);
+    assert_eq!(second.data.keys, [Key::Keymap]);
+    fixture.select_workspace(2);
+    fixture.sync(&mut first);
+    fixture.sync(&mut second);
+    assert!(first.data.keys.contains(&Key::Leave));
+    assert!(second.data.keys.contains(&Key::Enter));
+    assert!(!first.data.configures.last().unwrap().activated());
+    assert!(second.data.configures.last().unwrap().activated());
+    let first_keys = first.data.keys.len();
+    let second_keys = second.data.keys.len();
 
     // XKB keycode 38 is the evdev key 30 that clients see.
     let time = fixture.now + Duration::from_millis(7);
@@ -337,8 +351,8 @@ fn req_input_002_keys_reach_only_the_focused_client() {
         pressed,
         time: millis(time),
     };
-    assert_eq!(second.data.keys[2..], [key(true), key(false)]);
-    assert_eq!(first.data.keys.len(), 3);
+    assert_eq!(second.data.keys[second_keys..], [key(true), key(false)]);
+    assert_eq!(first.data.keys.len(), first_keys);
 }
 
 #[test]
@@ -348,6 +362,7 @@ fn req_api_011_client_that_disconnects_mid_frame_leaves_the_rest_running() {
     let window = fixture.map(&mut stays, RED);
     let mut leaves = fixture.connect();
     let leaving = fixture.map(&mut leaves, BLUE);
+    fixture.select_workspace(2);
     fixture.advance_to(START + HZ_60);
 
     // A frame of the leaving client is submitted and its flip is pending.
@@ -361,11 +376,12 @@ fn req_api_011_client_that_disconnects_mid_frame_leaves_the_rest_running() {
 
     // The compositor notices before the flip, then completes it for nobody.
     fixture.advance_to(START + HZ_60 + Duration::from_millis(1));
+    fixture.select_workspace(1);
     fixture.advance_to(flip);
     assert_eq!(fixture.color(), RED);
     fixture.sync(&mut stays);
     assert!(stays.data.configures.last().unwrap().activated());
-    assert_eq!(stays.data.keys.last(), Some(&Key::Enter));
+    assert!(stays.data.keys.contains(&Key::Enter));
 
     // The client that stayed is paced and reported as before.
     fixture.advance_to(flip + HZ_60);
@@ -411,4 +427,45 @@ fn req_api_010_buffer_above_the_limit_is_refused() {
     assert_eq!(fixture.color(), YELLOW);
     assert!(modest.data.configures.last().unwrap().activated());
     assert!(modest.protocol_error().is_none());
+}
+
+#[test]
+fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
+    let mut fixture = Fixture::new(config());
+    let mut first = fixture.connect();
+    let mut second = fixture.connect();
+    fixture.map(&mut first, RED);
+    fixture.map(&mut second, BLUE);
+    fixture.advance_to(START + HZ_60);
+    first.read();
+    second.read();
+
+    assert_eq!(fixture.color(), RED);
+    assert!(first.data.configures.last().unwrap().activated());
+    assert!(!second.data.configures.last().unwrap().activated());
+    assert_eq!(second.data.keys, [Key::Keymap]);
+    assert_eq!(second.data.presented, []);
+
+    // XKB keycodes for Left Super and the number 2. Release Super first to
+    // exercise suppression of the matching number key release.
+    fixture.select_workspace(2);
+    fixture.advance_to(START + 2 * HZ_60);
+    first.read();
+    second.read();
+
+    assert_eq!(fixture.color(), BLUE);
+    assert!(!first.data.configures.last().unwrap().activated());
+    assert!(second.data.configures.last().unwrap().activated());
+    assert!(first.data.keys.contains(&Key::Leave));
+    assert!(second.data.keys.contains(&Key::Enter));
+    assert!(second.data.presented.last().unwrap().time > START);
+    for client in [&first, &second] {
+        assert!(
+            !client
+                .data
+                .keys
+                .iter()
+                .any(|event| matches!(event, Key::Press { key: 3, .. }))
+        );
+    }
 }
