@@ -447,6 +447,31 @@ fn req_layout_018_explicit_geometry_is_reclamped_only_on_a_new_request() {
 }
 
 #[test]
+fn req_proto_004_layout_configures_wait_for_the_client_to_acknowledge() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let _window = fixture.map(&mut client, RED);
+    fixture.sync(&mut client);
+    let before = client.data.configures.len();
+
+    // Seat input changes focus repeatedly before the client can answer.
+    for _ in 0..17 {
+        fixture.select_workspace(2);
+        fixture.select_workspace(1);
+    }
+    fixture.select_workspace(2);
+    fixture.exchange(&mut client);
+    assert!(client.protocol_error().is_none());
+    assert_eq!(client.data.configures.len(), before + 32);
+    assert!(client.data.configures.last().unwrap().activated());
+
+    // The acknowledgements release a slot for the final, unfocused state.
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.len(), before + 33);
+    assert!(!client.data.configures.last().unwrap().activated());
+}
+
+#[test]
 fn req_layout_004_dialog_chooses_its_size_and_is_centered_over_its_parent() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
