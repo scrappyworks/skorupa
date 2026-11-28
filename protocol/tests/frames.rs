@@ -118,12 +118,16 @@ proptest! {
     /// the length of its frame, and leaves following bytes alone.
     #[test]
     fn req_proto_007_round_trip(message in message(), tail in vec(any::<u8>(), 0..16)) {
-        let mut bytes = encoded(&message);
-        let len = bytes.len();
-        prop_assert_eq!(message.encoded_len(), len);
-        prop_assert_eq!(frame_len(bytes[..PREFIX_LEN].try_into().unwrap()), Ok(len));
-        bytes.extend(tail);
-        prop_assert_eq!(decode(&bytes), Ok((message, len)));
+        // REQ-PROTO-014: both an exact-size buffer and a larger one succeed.
+        let len = message.encoded_len();
+        for trailing in [&[][..], tail.as_slice()] {
+            let mut bytes = vec![0xa5; len];
+            bytes.extend_from_slice(trailing);
+            prop_assert_eq!(message.encode(&mut bytes), Ok(len));
+            prop_assert_eq!(&bytes[len..], trailing);
+            prop_assert_eq!(frame_len(bytes[..PREFIX_LEN].try_into().unwrap()), Ok(len));
+            prop_assert_eq!(decode(&bytes), Ok((message, len)));
+        }
     }
 
     /// REQ-PROTO-008: the decoder returns a value for any input. A panic
