@@ -206,6 +206,15 @@ impl FramePacer {
         }
     }
 
+    /// Discards flip and timer state when the output is reset. Surfaces can
+    /// survive that reset and still remember their last frame callback cycle.
+    pub fn reset(&mut self) {
+        *self = Self {
+            frame_callback_sequence: self.frame_callback_sequence,
+            ..Self::new(self.refresh_interval(), self.flip_timeout)
+        };
+    }
+
     #[must_use]
     pub fn redraw_state(&self) -> RedrawState {
         self.redraw

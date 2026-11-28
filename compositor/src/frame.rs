@@ -563,10 +563,7 @@ impl State {
     }
 
     fn reset_frame_clock(&mut self) {
-        self.pacer = skorupa_compositor_core::frame_clock::FramePacer::new(
-            self.pacer.refresh_interval(),
-            self.config.flip_timeout,
-        );
+        self.pacer.reset();
         self.timers = Timers::default();
         self.discard_pending_feedback();
     }
@@ -724,6 +721,31 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn req_perf_014_frame_clock_reset_does_not_reuse_the_last_callback_cycle() {
+        let mut compositor = crate::Compositor::new(crate::Config::default()).unwrap();
+        let now = Duration::from_secs(1);
+        compositor.dispatch(now).unwrap();
+        let previous = compositor.state.pacer.frame_callback_sequence();
+        assert_eq!(previous, 1);
+        compositor.state.reset_frame_clock();
+
+        // The surfaces still carry the previous cycle when the seat returns.
+        let mut pacer = compositor.state.pacer.clone();
+        for event in [
+            Event::QueueRedraw,
+            Event::Redraw { now },
+            Event::Rendered {
+                now,
+                outcome: RenderOutcome::Submitted,
+                animations_remain: false,
+            },
+        ] {
+            pacer = pacer.step(event).0;
+        }
+        assert_ne!(pacer.frame_callback_sequence(), previous);
+    }
 
     #[test]
     fn req_perf_003_reset_keeps_the_exact_mode_interval() {
