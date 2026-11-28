@@ -398,32 +398,35 @@ impl State {
         self.arrange();
     }
 
-    /// Refuses a pending buffer above the configured size before anything
-    /// reads it: the buffer is dropped from the commit and the client gets a
-    /// protocol error, which disconnects it.
-    fn refuse_oversized_buffer(&self, surface: &WlSurface) {
+    /// Checks the pending attachment before the renderer can consume it.
+    fn check_buffer_size(&self, surface: &WlSurface) {
         let (max_w, max_h) = self.config.max_buffer_size;
-        let oversized = with_states(surface, |states| {
+        let error = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             let pending = attributes.pending();
             let Some(BufferAssignment::NewBuffer(buffer)) = &pending.buffer else {
                 return None;
             };
             let size = buffer_dimensions(buffer)?;
-            if size.w <= max_w && size.h <= max_h {
-                return None;
-            }
-            pending.buffer = None;
-            Some(size)
-        });
-        if let Some(size) = oversized {
-            surface.post_error(
-                wl_surface::Error::InvalidSize,
+            let scale = pending.buffer_scale;
+            let reason = if size.w > max_w || size.h > max_h {
                 format!(
                     "buffer of {}x{} is larger than the limit of {max_w}x{max_h}",
                     size.w, size.h
-                ),
-            );
+                )
+            } else if size.w % scale != 0 || size.h % scale != 0 {
+                format!(
+                    "buffer of {}x{} is not divisible by scale {scale}",
+                    size.w, size.h
+                )
+            } else {
+                return None;
+            };
+            pending.buffer = None;
+            Some(reason)
+        });
+        if let Some(reason) = error {
+            surface.post_error(wl_surface::Error::InvalidSize, reason);
         }
     }
 }
@@ -445,7 +448,7 @@ impl CompositorHandler for State {
 
     fn new_surface(&mut self, surface: &WlSurface) {
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
-            state.refuse_oversized_buffer(surface);
+            state.check_buffer_size(surface);
         });
     }
 

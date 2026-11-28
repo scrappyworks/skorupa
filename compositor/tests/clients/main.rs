@@ -481,6 +481,30 @@ fn req_api_011_client_that_disconnects_mid_frame_leaves_the_rest_running() {
 }
 
 #[test]
+fn req_api_001_attached_buffer_dimensions_are_multiples_of_the_pending_scale() {
+    use wayland_client::protocol::wl_surface;
+
+    let mut fixture = Fixture::new(config());
+    for (width, height) in [(3, 4), (4, 3), (4, 4)] {
+        let mut client = fixture.connect();
+        let window = client.create_window();
+        fixture.sync(&mut client);
+        window.surface.set_buffer_scale(2);
+        let buffer = client.buffer(width, height, Format::Xrgb8888, RED);
+        client.commit(&window, Some(&buffer));
+        fixture.exchange(&mut client);
+        if (width, height) == (4, 4) {
+            assert!(client.protocol_error().is_none());
+            assert_eq!(fixture.color(), RED);
+        } else {
+            let error = client.protocol_error().unwrap();
+            assert_eq!(error.object_interface, "wl_surface");
+            assert_eq!(error.code, wl_surface::Error::InvalidSize as u32);
+        }
+    }
+}
+
+#[test]
 fn req_api_010_buffer_above_the_limit_is_refused() {
     let mut fixture = Fixture::new(config());
     // Exactly at the limit: accepted.
