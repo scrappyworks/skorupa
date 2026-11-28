@@ -67,7 +67,8 @@ that the user is not in the `input` group and that ptrace is restricted.
 stateDiagram-v2
   [*] --> Unlocked
   Unlocked --> Locking: logind Lock, shortcut, idle
-  Locking --> Locked: locked frame presented
+  Locking --> Locked: locked frame presented, or output off
+  Locked --> Locking: resume, output enabled
   Locked --> Checking: credentials from lock/ui
   Checking --> Locked: failure, timeout, stale epoch
   Checking --> Unlocked: authd verdict for this epoch and attempt
@@ -79,7 +80,11 @@ stateDiagram-v2
   itself, so `lock/ui` gets a render-only role instead; the standard protocol is used only for the
   first bring-up with an unchanged locker.
 - **Acknowledge after presentation.** Lock is confirmed only after a locked frame is on screen.
-  Sleep waits for that confirmation.
+  Sleep waits for that confirmation. A resume or a returning output voids the confirmation, and
+  credentials are taken only while a current locked frame is on screen.
+- **A sleep acknowledgement is a commitment.** From the acknowledgement until the sleep is over
+  the compositor accepts no verdict (the sleep hold). The hold ends on the clock jump of the
+  resume or on the bridge's report for the compositor's hold token.
 - **Every failure stays locked:** no output, failed page flip, inhibitor timeout, `lock/ui` crash
   loop, first frame after resume, a `CLOCK_BOOTTIME` jump. A compositor crash returns to the
   greeter, which asks for the password.
