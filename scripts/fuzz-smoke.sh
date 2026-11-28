@@ -11,6 +11,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../fuzz"
 runs=${FUZZ_SMOKE_RUNS:-100000}
+# libFuzzer reads a signed int and treats a negative count as unlimited.
+if [[ ! $runs =~ ^0*([1-9][0-9]{0,9})$ ]] || (( BASH_REMATCH[1] > 2147483647 )); then
+    echo "FUZZ_SMOKE_RUNS must be an integer from 1 to 2147483647" >&2
+    exit 2
+fi
+runs=${BASH_REMATCH[1]}
 work=$(mktemp -d -t skorupa-fuzz-smoke.XXXXXX)
 trap 'rm -rf "${work:?}"' EXIT
 

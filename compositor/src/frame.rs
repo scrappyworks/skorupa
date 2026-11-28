@@ -23,9 +23,9 @@ use smithay::backend::renderer::element::{
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::{Color32F, ImportAll, Renderer};
 use smithay::desktop::utils::{
-    OutputPresentationFeedback, send_frames_surface_tree, surface_primary_scanout_output,
-    take_presentation_feedback_surface_tree, update_surface_primary_scanout_output,
-    with_surfaces_surface_tree,
+    OutputPresentationFeedback, bbox_from_surface_tree, send_frames_surface_tree,
+    surface_primary_scanout_output, take_presentation_feedback_surface_tree,
+    update_surface_primary_scanout_output, with_surfaces_surface_tree,
 };
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
@@ -74,11 +74,23 @@ where
                 .current()
                 .geometry
         });
-        let offset = geometry.map_or_else(Point::default, |geometry| geometry.loc);
+        let origin = if window.dialog {
+            let bounds = bbox_from_surface_tree(surface, (0, 0));
+            let geometry = geometry
+                .and_then(|geom| geom.intersection(bounds))
+                .unwrap_or(bounds);
+            let center_offset = Point::from((
+                (rect.size.w - geometry.size.w) / 2,
+                (rect.size.h - geometry.size.h) / 2,
+            ));
+            rect.loc + center_offset - geometry.loc
+        } else {
+            rect.loc - geometry.map_or_else(Point::default, |geometry| geometry.loc)
+        };
         elements.extend(render_elements_from_surface_tree(
             renderer,
             surface,
-            (rect.loc - offset).to_physical(1),
+            origin.to_physical(1),
             1.0,
             1.0,
             Kind::Unspecified,

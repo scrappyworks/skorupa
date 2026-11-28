@@ -221,7 +221,7 @@ impl FramePacer {
         self.clock.refresh_interval()
     }
 
-    /// At most four effects come out of one event.
+    /// At most five effects come out of one event.
     #[must_use]
     pub fn step(mut self, event: Event) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
@@ -287,6 +287,10 @@ impl FramePacer {
 
         match outcome {
             RenderOutcome::Submitted => {
+                // A flip already received belongs to an older submission.
+                if self.held_flip.take().is_some() {
+                    effects.push(Effect::CancelTimer(Timer::Throttle));
+                }
                 if timer_running {
                     effects.push(Effect::CancelTimer(Timer::EstimatedVBlank));
                 }
@@ -342,21 +346,34 @@ impl FramePacer {
         sequence: u32,
         effects: &mut Vec<Effect>,
     ) {
-        let timestamp = time.unwrap_or(now);
+        // A hardware stamp slightly ahead of dispatch is common. A stamp
+        // more than a refresh ahead cannot anchor either pacing or feedback.
+        let refresh = self.clock.refresh_interval();
+        let mut time = time.filter(|stamp| {
+            let valid = refresh.is_none_or(|interval| *stamp <= now.saturating_add(interval));
+            if !valid {
+                effects.push(Effect::Anomaly(Anomaly::FlipFarInFuture));
+            }
+            valid
+        });
+        let mut timestamp = time.unwrap_or(now);
         let replaces_held_flip = self.held_flip.take().is_some();
 
-        if let Some(wait) = self
-            .throttle
-            .throttle(self.clock.refresh_interval(), timestamp)
-        {
-            // The flip did complete, so the watchdog has nothing left to guard.
-            self.cancel_watchdog(effects);
-            self.held_flip = Some(sequence);
-            effects.push(Effect::ArmTimer {
-                timer: Timer::Throttle,
-                at: now.saturating_add(wait),
-            });
-            return;
+        if let Some(at) = self.throttle.deadline(refresh, timestamp) {
+            if at > now {
+                self.cancel_watchdog(effects);
+                self.held_flip = Some(sequence);
+                effects.push(Effect::ArmTimer {
+                    timer: Timer::Throttle,
+                    at,
+                });
+                return;
+            }
+            // Dispatch already consumed the whole pacing delay. Deliver as
+            // if the throttle timer had just fired at the dispatch time.
+            timestamp = now;
+            time = None;
+            self.throttle.deadline(None, now);
         }
         if replaces_held_flip {
             effects.push(Effect::CancelTimer(Timer::Throttle));

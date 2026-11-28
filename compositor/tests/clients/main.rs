@@ -16,6 +16,7 @@ use skorupa_compositor::core::lock::{self, Clocks, Phase};
 use skorupa_compositor::protocol::{self, Challenge, LockEpoch, Message, Outcome, Verdict};
 use skorupa_compositor::{Compositor, Config};
 use wayland_client::protocol::wl_shm::Format;
+use wayland_protocols::xdg::shell::client::xdg_toplevel;
 
 /// When the compositor draws its first, empty frame.
 const BOOT: Duration = Duration::from_secs(999);
@@ -175,6 +176,62 @@ fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
     assert!(client.protocol_error().is_none());
 }
 
+#[test]
+fn req_layout_003_setting_an_unmapped_parent_keeps_the_child_independent() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let parent = client.create_window();
+    fixture.sync(&mut client);
+    let child = client.create_toplevel(Some(&parent));
+    fixture.sync(&mut client);
+    let initial = client.data.configures.last().unwrap();
+    assert_eq!(initial.size, (WIDTH, HEIGHT));
+    for edge in [
+        xdg_toplevel::State::TiledLeft,
+        xdg_toplevel::State::TiledRight,
+        xdg_toplevel::State::TiledTop,
+        xdg_toplevel::State::TiledBottom,
+    ] {
+        assert!(initial.states.contains(&edge));
+    }
+
+    let red = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, RED);
+    client.commit(&parent, Some(&red));
+    fixture.sync(&mut client);
+    let blue = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&child, Some(&blue));
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.color(), RED);
+    fixture.select_workspace(2);
+    fixture.advance_to(START + 2 * HZ_60);
+    assert_eq!(fixture.color(), BLUE);
+}
+
+#[test]
+fn req_layout_004_dialog_chooses_its_size_and_is_centered_over_its_parent() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let parent = fixture.map(&mut client, RED);
+    let dialog = client.create_toplevel(Some(&parent));
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.last().unwrap().size, (0, 0));
+
+    let buffer = client.buffer(8, 6, Format::Xrgb8888, BLUE);
+    client.commit(&dialog, Some(&buffer));
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+
+    let pixels = fixture.compositor.pixels().unwrap();
+    for (index, bytes) in pixels.as_chunks::<4>().0.iter().enumerate() {
+        let width = usize::try_from(WIDTH).unwrap();
+        let (x, y) = (index % width, index / width);
+        let inside = (28..36).contains(&x) && (21..27).contains(&y);
+        let expected = if inside { BLUE } else { RED };
+        assert_eq!(u32::from_ne_bytes(*bytes) | 0xff00_0000, expected);
+    }
+}
+
 /// A client that commits a new buffer on every frame callback. The headless
 /// backend completes a flip at once, so the pacing is the reducer's alone.
 fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {
@@ -234,6 +291,31 @@ fn req_perf_015_feedback_carries_the_time_of_each_flip_at_60_hz() {
 #[test]
 fn req_perf_012_headless_frames_are_one_interval_apart_at_180_hz() {
     presents_one_interval_apart(180_000, HZ_180);
+}
+
+#[test]
+fn req_perf_012_time_spent_dispatching_counts_towards_the_frame_deadline() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, RED);
+    let buffer = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&window, Some(&buffer));
+    client.flush();
+
+    let draw_cost = Duration::from_millis(5);
+    let mut times = [START, START + draw_cost].into_iter();
+    let wait = fixture
+        .compositor
+        .dispatch_timeout(|| times.next().unwrap())
+        .unwrap();
+    assert_eq!(wait, HZ_60.checked_sub(draw_cost));
+
+    let mut times = [START + draw_cost, START + HZ_60].into_iter();
+    let wait = fixture
+        .compositor
+        .dispatch_timeout(|| times.next().unwrap())
+        .unwrap();
+    assert_eq!(wait, Some(Duration::ZERO));
 }
 
 #[test]
@@ -444,6 +526,8 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
     second.read();
 
     assert_eq!(fixture.color(), RED);
+    assert!(first.data.on_output);
+    assert!(!second.data.on_output);
     assert!(first.data.configures.last().unwrap().activated());
     assert!(!second.data.configures.last().unwrap().activated());
     assert_eq!(second.data.keys, [Key::Keymap]);
@@ -457,6 +541,8 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
     second.read();
 
     assert_eq!(fixture.color(), BLUE);
+    assert!(!first.data.on_output);
+    assert!(second.data.on_output);
     assert!(!first.data.configures.last().unwrap().activated());
     assert!(second.data.configures.last().unwrap().activated());
     assert!(first.data.keys.contains(&Key::Leave));

@@ -9,7 +9,7 @@
 //!   grant in the table cannot stop an effect that already left the reducer,
 //!   so the adapter sends [`Event::Use`] immediately before data leaves and
 //!   delivers only on [`Effect::Deliver`]. That step reads the connection, the
-//!   target, the clock and the lock state at that moment.
+//!   target, the delivery kind, the clock and the lock state at that moment.
 //! - **Property D.** An agent's grant is used up by one delivery, and in v1
 //!   no grant for agent capture of a host window is ever made.
 //!
@@ -149,6 +149,8 @@ pub enum Event {
     Use {
         /// The grant the delivery claims.
         generation: u64,
+        /// What the adapter is about to deliver.
+        kind: Kind,
         /// The connection the data would be written to.
         connection: ConnectionId,
         /// What the data shows.
@@ -203,7 +205,7 @@ pub enum Cause {
     PromptExited,
     /// The queue or the table is full.
     Full,
-    /// This kind of grant does not exist in this build.
+    /// This build does not offer the requested kind and target together.
     NotOffered,
 }
 
@@ -266,6 +268,8 @@ pub struct State {
     instance: InstanceId,
     agent_capture: bool,
     watch: SleepWatch,
+    /// All live grants and pending consent belong to the last observed lock epoch.
+    epoch: u64,
     grants: Vec<Grant>,
     /// The open prompt and its number.
     prompt: Option<OpenPrompt>,
@@ -285,6 +289,7 @@ impl State {
             instance,
             agent_capture,
             watch,
+            epoch: 0,
             grants: Vec::new(),
             prompt: None,
             queue: VecDeque::new(),
@@ -424,9 +429,13 @@ impl State {
             Event::Requested(request) => {
                 let cause = if !lock.unlocked {
                     Some(Cause::Lock)
-                } else if request.kind == Kind::AgentCapture && !self.agent_capture {
+                } else if (request.kind == Kind::AgentCapture && !self.agent_capture)
+                    || (request.kind.is_agent() && request.target == Target::Screen)
+                {
                     // REQ-AGENT-001: in v1 the user is not even asked.
                     Some(Cause::NotOffered)
+                } else if request.ttl.is_zero() {
+                    Some(Cause::Expired)
                 } else if self.queue.len() >= MAX_QUEUED {
                     Some(Cause::Full)
                 } else {
@@ -456,6 +465,7 @@ impl State {
             }
             Event::Use {
                 generation,
+                kind,
                 connection,
                 target,
             } => {
@@ -463,6 +473,7 @@ impl State {
                 // table before this point, with the readings of this event.
                 let claimed = |grant: &Grant| {
                     grant.generation == generation
+                        && grant.kind == kind
                         && grant.connection == connection
                         && grant.target == target
                 };
@@ -524,17 +535,12 @@ pub fn step(mut state: State, mut input: Input) -> (State, Vec<Effect>) {
         input.lock.unlocked = false;
     }
     let lock = input.lock;
-    if !lock.unlocked {
+    if !lock.unlocked || state.epoch != lock.epoch {
+        state.epoch = lock.epoch;
         state.end_all(&mut effects, Cause::Lock);
     }
     state.end_grants(&mut effects, |grant| {
-        if grant.epoch != lock.epoch {
-            Some(Cause::Lock)
-        } else if now.boottime >= grant.expires {
-            Some(Cause::Expired)
-        } else {
-            None
-        }
+        (now.boottime >= grant.expires).then_some(Cause::Expired)
     });
     let prompt_was_open = state.prompt.is_some();
     if let Some(expired) = state.prompt.take_if(|open| now.boottime >= open.deadline) {

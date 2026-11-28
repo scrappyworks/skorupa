@@ -33,4 +33,19 @@ impl VBlankThrottle {
         self.last_vblank_timestamp = Some(timestamp);
         None
     }
+
+    /// Absolute pacing deadline on the same monotonic clock as the flip.
+    pub(super) fn deadline(
+        &mut self,
+        refresh_interval: Option<Duration>,
+        timestamp: Duration,
+    ) -> Option<Duration> {
+        self.throttle(refresh_interval, timestamp)?;
+        // A held flip keeps the last reference; dispatch may already have
+        // passed its next refresh even when the hardware timestamp did not.
+        Some(
+            self.last_vblank_timestamp?
+                .saturating_add(refresh_interval?),
+        )
+    }
 }

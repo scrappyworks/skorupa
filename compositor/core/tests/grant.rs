@@ -122,6 +122,7 @@ impl Rig {
         let generation = grant.generation;
         let effects = self.send(Event::Use {
             generation,
+            kind: grant.kind,
             connection: grant.connection,
             target: grant.target,
         });
@@ -436,6 +437,7 @@ fn req_lock_021_grant_does_not_outlive_a_lock_it_never_saw() {
     assert_eq!(
         rig.send(Event::Use {
             generation,
+            kind: grant.kind,
             connection: grant.connection,
             target: grant.target
         }),
@@ -553,6 +555,7 @@ fn req_agent_005_transfer_is_delivered_once() {
     let cause = Cause::Used;
     let used = rig.send(Event::Use {
         generation,
+        kind: Kind::AgentTransfer,
         connection: AGENT,
         target: WINDOW,
     });
@@ -684,7 +687,7 @@ struct Walk {
     watch: SleepWatch,
     issued: Vec<Grant>,
     dead: HashSet<u64>,
-    prompt: Option<(PromptId, Request, Duration)>,
+    prompt: Option<(PromptId, Request, Duration, u64)>,
     prompts: u64,
     deliveries: usize,
 }
@@ -770,11 +773,13 @@ impl Walk {
                 match self.pick(nth).filter(|_| own) {
                     Some(grant) => Event::Use {
                         generation,
+                        kind: grant.kind,
                         connection: grant.connection,
                         target: grant.target,
                     },
                     None => Event::Use {
                         generation,
+                        kind: Kind::PortalStream,
                         connection,
                         target,
                     },
@@ -840,6 +845,7 @@ impl Walk {
         let claimed = |grant: &&Grant| {
             let used = Event::Use {
                 generation,
+                kind: grant.kind,
                 connection: grant.connection,
                 target: grant.target,
             };
@@ -898,8 +904,10 @@ impl Walk {
                 if !slept && lock.unlocked =>
             {
                 self.prompt
-                    .take_if(|(open, _, deadline)| *open == prompt && now.boottime < *deadline)
-                    .map(|(open, request, _)| (open, request))
+                    .take_if(|(open, _, deadline, epoch)| {
+                        *open == prompt && now.boottime < *deadline && lock.epoch == *epoch
+                    })
+                    .map(|(open, request, _, _)| (open, request))
             }
             _ => None,
         };
@@ -932,10 +940,19 @@ impl Walk {
                     // REQ-AGENT-001: in v1 nobody is even asked.
                     prop_assert!(agent_capture || request.kind != Kind::AgentCapture);
                     prop_assert!(lock.unlocked);
-                    self.prompt = Some((prompt, request, now.boottime + Duration::from_secs(60)));
+                    prop_assert!(
+                        request.kind == Kind::PortalStream || request.target != Target::Screen
+                    );
+                    prop_assert!(!request.ttl.is_zero());
+                    self.prompt = Some((
+                        prompt,
+                        request,
+                        now.boottime + Duration::from_secs(60),
+                        lock.epoch,
+                    ));
                 }
                 Effect::ClosePrompt { prompt } => {
-                    let open = self.prompt.take().map(|(open, _, _)| open);
+                    let open = self.prompt.take().map(|(open, _, _, _)| open);
                     prop_assert_eq!(open, Some(prompt));
                 }
                 Effect::Denied { .. } => {}
@@ -965,7 +982,7 @@ impl Walk {
             .grants()
             .iter()
             .map(|grant| grant.expires)
-            .chain(self.prompt.map(|(_, _, deadline)| deadline))
+            .chain(self.prompt.map(|(_, _, deadline, _)| deadline))
             .min();
         prop_assert_eq!(self.rig.state.next_expiry(), soonest);
         Ok(())
@@ -1055,4 +1072,76 @@ fn req_trust_012_unanswered_consent_expires_before_an_answer_at_the_deadline() {
         ]
     );
     assert_eq!(rig.live(), []);
+}
+
+#[test]
+fn req_lock_021_unobserved_lock_discards_open_and_queued_consent() {
+    let mut rig = Rig::v1();
+    rig.send(Event::Requested(STREAM));
+    let prompt = rig.prompt.unwrap();
+    rig.send(Event::Requested(TRANSFER));
+    rig.lock.epoch += 1;
+    let cause = Cause::Lock;
+    assert_eq!(
+        rig.answer(true),
+        [
+            Effect::ClosePrompt { prompt },
+            Effect::Denied {
+                request: STREAM,
+                cause
+            },
+            Effect::Denied {
+                request: TRANSFER,
+                cause
+            },
+        ]
+    );
+    assert_eq!(rig.state.next_expiry(), None);
+    let grant = rig.grant(STREAM);
+    assert!(rig.deliver(&grant));
+}
+
+#[test]
+fn req_cap_011_agent_requests_are_scoped_to_a_window() {
+    let mut rig = Rig::new(true);
+    for kind in [Kind::AgentCapture, Kind::AgentTransfer] {
+        let request = request(kind, AGENT, Target::Screen);
+        assert_eq!(
+            rig.send(Event::Requested(request)),
+            [Effect::Denied {
+                request,
+                cause: Cause::NotOffered
+            }]
+        );
+    }
+    let stream = rig.grant(request(Kind::PortalStream, PORTAL, Target::Screen));
+    assert!(rig.deliver(&stream));
+}
+
+#[test]
+fn req_agent_001_clipboard_consent_cannot_authorize_capture() {
+    let mut rig = Rig::v1();
+    let transfer = rig.grant(TRANSFER);
+    assert!(!rig.deliver(&Grant {
+        kind: Kind::AgentCapture,
+        ..transfer
+    }));
+    assert!(rig.deliver(&transfer));
+}
+
+#[test]
+fn req_grant_013_zero_ttl_request_creates_no_live_grant() {
+    let mut rig = Rig::v1();
+    let request = Request {
+        ttl: Duration::ZERO,
+        ..STREAM
+    };
+    assert_eq!(
+        rig.send(Event::Requested(request)),
+        [Effect::Denied {
+            request,
+            cause: Cause::Expired
+        }]
+    );
+    assert_eq!(rig.state.next_expiry(), None);
 }
