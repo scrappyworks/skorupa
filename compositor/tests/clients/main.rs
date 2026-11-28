@@ -127,9 +127,14 @@ impl Fixture {
 
     /// The color of the top left pixel of the last frame, without alpha.
     fn color(&mut self) -> u32 {
+        self.pixel(0, 0)
+    }
+
+    fn pixel(&mut self, x: i32, y: i32) -> u32 {
         let pixels = self.compositor.pixels().unwrap();
         assert_eq!(pixels.len(), usize::try_from(WIDTH * HEIGHT * 4).unwrap());
-        u32::from_ne_bytes(*pixels.first_chunk().unwrap()) | 0xff00_0000
+        let index = usize::try_from(y * WIDTH + x).unwrap();
+        u32::from_ne_bytes(pixels.as_chunks::<4>().0[index]) | 0xff00_0000
     }
 }
 
@@ -168,12 +173,102 @@ fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
     client.commit(&window, Some(&buffer));
     fixture.sync(&mut client);
     assert_eq!(fixture.color(), RED);
-    assert!(client.data.on_output);
+    assert!(client.data.on_output(&window.surface));
     assert_eq!(client.data.frames, [millis(START)]);
     assert_eq!(client.data.configures.len(), 2);
     assert!(client.data.configures[1].activated());
     assert_eq!(client.data.keys, [Key::Keymap, Key::Enter]);
     assert!(client.protocol_error().is_none());
+}
+
+#[test]
+fn req_api_001_one_client_tracks_its_windows_on_different_workspaces() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let first = fixture.map(&mut client, RED);
+    let (child, _role) = client.create_subsurface(&first.surface);
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, GREEN);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    first.surface.commit();
+    fixture.sync(&mut client);
+    let second = fixture.map(&mut client, BLUE);
+    fixture.advance_to(START + HZ_60);
+    client.read();
+    assert!(client.data.on_output(&first.surface));
+    assert!(client.data.on_output(&child));
+    assert!(!client.data.on_output(&second.surface));
+
+    fixture.select_workspace(2);
+    fixture.advance_to(START + HZ_60 * 2);
+    client.read();
+    assert!(!client.data.on_output(&first.surface));
+    assert!(!client.data.on_output(&child));
+    assert!(client.data.on_output(&second.surface));
+}
+
+#[test]
+fn req_api_001_scale_only_commit_resizes_the_attached_buffer() {
+    let mut fixture = Fixture::new(config());
+    let background = fixture.color();
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    assert_eq!(fixture.pixel(WIDTH / 2, 0), RED);
+    root.surface.set_buffer_scale(2);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.pixel(WIDTH / 2 - 1, 0), RED);
+    assert_eq!(fixture.pixel(WIDTH / 2, 0), background);
+
+    // A new attachment accompanying a scale change replaces the old one.
+    let replacement = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    root.surface.set_buffer_scale(1);
+    client.commit(&root, Some(&replacement));
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!(fixture.pixel(1, 1), BLUE);
+    assert_eq!(fixture.pixel(2, 0), background);
+}
+
+#[test]
+fn req_api_001_child_buffer_mapping_waits_for_the_parent_commit() {
+    use wayland_client::protocol::wl_output::Transform;
+
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, _role) = client.create_subsurface(&root.surface);
+    let buffer = client.buffer(4, 2, Format::Xrgb8888, BLUE);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.pixel(3, 0), BLUE);
+
+    // The compositor can keep displaying the contents after wl_buffer.destroy.
+    buffer.destroy();
+    child.set_buffer_scale(2);
+    child.set_buffer_transform(Transform::_90);
+    child.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!(fixture.pixel(3, 0), BLUE);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 3);
+    assert_eq!(fixture.pixel(0, 1), BLUE);
+    assert_eq!(fixture.pixel(1, 0), RED);
+    assert_eq!(fixture.pixel(0, 2), RED);
+
+    child.set_buffer_transform(Transform::Normal);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 4);
+    assert_eq!(fixture.pixel(1, 0), BLUE);
+    assert_eq!(fixture.pixel(0, 1), RED);
 }
 
 #[test]
@@ -543,15 +638,15 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
     let mut fixture = Fixture::new(config());
     let mut first = fixture.connect();
     let mut second = fixture.connect();
-    fixture.map(&mut first, RED);
-    fixture.map(&mut second, BLUE);
+    let red = fixture.map(&mut first, RED);
+    let blue = fixture.map(&mut second, BLUE);
     fixture.advance_to(START + HZ_60);
     first.read();
     second.read();
 
     assert_eq!(fixture.color(), RED);
-    assert!(first.data.on_output);
-    assert!(!second.data.on_output);
+    assert!(first.data.on_output(&red.surface));
+    assert!(!second.data.on_output(&blue.surface));
     assert!(first.data.configures.last().unwrap().activated());
     assert!(!second.data.configures.last().unwrap().activated());
     assert_eq!(second.data.keys, [Key::Keymap]);
@@ -565,8 +660,8 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
     second.read();
 
     assert_eq!(fixture.color(), BLUE);
-    assert!(!first.data.on_output);
-    assert!(second.data.on_output);
+    assert!(!first.data.on_output(&red.surface));
+    assert!(second.data.on_output(&blue.surface));
     assert!(!first.data.configures.last().unwrap().activated());
     assert!(second.data.configures.last().unwrap().activated());
     assert!(first.data.keys.contains(&Key::Leave));

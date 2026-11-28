@@ -11,7 +11,9 @@ use std::time::Duration;
 use skorupa_compositor_core::frame_clock::FramePacer;
 use skorupa_compositor_core::layout::{Effect, Event, MAX_APP_ID_LEN};
 use smithay::backend::input::{InputTime, KeyState};
-use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
+use smithay::backend::renderer::utils::{
+    RendererSurfaceStateUserData, on_commit_buffer_handler, with_renderer_surface_state,
+};
 use smithay::backend::renderer::{ImportMemWl, buffer_dimensions};
 use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::input::keyboard::{FilterResult, KeyboardSource, XkbConfig, keysyms};
@@ -431,6 +433,30 @@ impl State {
     }
 }
 
+/// Smithay reads a change in buffer scale or transform only with a buffer
+/// assignment. Reuse its retained buffer after the transaction applies; an
+/// actual replacement or removal in the same commit always wins.
+fn apply_buffer_mapping(surface: &WlSurface) {
+    with_states(surface, |states| {
+        let Some(renderer) = states.data_map.get::<RendererSurfaceStateUserData>() else {
+            return;
+        };
+        let Ok(renderer) = renderer.lock() else {
+            return;
+        };
+        let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+        let current = attributes.current();
+        if current.buffer.is_none()
+            && (current.buffer_scale != renderer.buffer_scale()
+                || smithay::utils::Transform::from(current.buffer_transform)
+                    != renderer.buffer_transform())
+            && let Some(buffer) = renderer.buffer()
+        {
+            current.buffer = Some(BufferAssignment::NewBuffer((**buffer).clone()));
+        }
+    });
+}
+
 impl CompositorHandler for State {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor
@@ -453,6 +479,7 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        apply_buffer_mapping(surface);
         on_commit_buffer_handler::<Self>(surface);
         if let Some(index) = self
             .windows
