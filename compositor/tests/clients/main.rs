@@ -951,6 +951,27 @@ fn req_api_010_buffer_above_the_limit_is_refused() {
 }
 
 #[test]
+fn req_api_010_oversized_replacement_of_a_visible_buffer_never_reaches_the_output() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, GREEN);
+    assert_eq!(fixture.color(), GREEN);
+
+    let oversized = client.buffer(WIDTH + 1, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&window, Some(&oversized));
+    fixture.exchange(&mut client);
+    let error = client.protocol_error().unwrap();
+    assert_eq!(error.object_interface, "wl_surface");
+    assert_eq!(
+        error.code,
+        wayland_client::protocol::wl_surface::Error::InvalidSize as u32
+    );
+    assert_ne!(fixture.color(), BLUE);
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_ne!(fixture.color(), BLUE);
+}
+
+#[test]
 fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
     let mut fixture = Fixture::new(config());
     let mut first = fixture.connect();
