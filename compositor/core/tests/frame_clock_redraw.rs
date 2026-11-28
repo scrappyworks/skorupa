@@ -641,21 +641,24 @@ fn req_perf_015_held_flip_cannot_complete_a_later_submission() {
 
 #[test]
 fn req_perf_012_delayed_dispatch_consumes_the_elapsed_throttle_interval() {
-    let mut output = Harness::new(Some(ms(10)));
-    output.redraw(ms(90));
-    output.rendered(ms(90), RenderOutcome::Submitted);
-    output.flip(ms(100), Some(ms(100)), 1);
-    output.redraw(ms(100));
-    output.rendered(ms(100), RenderOutcome::Submitted);
-    let effects = output.flip(ms(120), Some(ms(101)), 2);
+    // A dispatch at the deadline can publish immediately, just like a later one.
+    for dispatch in [ms(110), ms(120)] {
+        let mut output = Harness::new(Some(ms(10)));
+        output.redraw(ms(90));
+        output.rendered(ms(90), RenderOutcome::Submitted);
+        output.flip(ms(100), Some(ms(100)), 1);
+        output.redraw(ms(100));
+        output.rendered(ms(100), RenderOutcome::Submitted);
+        let effects = output.flip(dispatch, Some(ms(101)), 2);
 
-    assert!(effects.contains(&Effect::Presented {
-        time: ms(101),
-        refresh: Some(ms(10)),
-        sequence: 2,
-        hw_clock: true,
-    }));
-    assert_eq!(output.timers, [None; 3]);
+        assert!(effects.contains(&Effect::Presented {
+            time: ms(101),
+            refresh: Some(ms(10)),
+            sequence: 2,
+            hw_clock: true,
+        }));
+        assert_eq!(output.timers, [None; 3]);
+    }
 }
 
 /// A client that commits without damage on every frame callback must not spin:
