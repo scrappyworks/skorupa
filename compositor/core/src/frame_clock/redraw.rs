@@ -120,7 +120,8 @@ pub enum Effect {
         sequence: u32,
     },
     /// The submitted frame is on screen: send its presentation feedback, if
-    /// any is held. Without `hw_clock`, `time` is when the event was handled.
+    /// any is held. Software timing uses the completion time or the paced
+    /// presentation deadline when a flip was held.
     Presented {
         time: Duration,
         refresh: Option<Duration>,
@@ -147,6 +148,14 @@ pub enum Anomaly {
     FlipFarInFuture,
 }
 
+/// The completion is known. Only its delivery waits for the pacing deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeldFlip {
+    sequence: u32,
+    stamp: Option<Duration>,
+    due: Duration,
+}
+
 /// Frame timing of one output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FramePacer {
@@ -156,8 +165,7 @@ pub struct FramePacer {
     flip_timeout: Duration,
     /// Target of the render that was asked for and not answered yet.
     target: Option<Duration>,
-    /// Sequence of a completed flip that the throttle holds back.
-    held_flip: Option<u32>,
+    held_flip: Option<HeldFlip>,
     watchdog_armed: bool,
     /// After the last redraw, some ongoing animations still remain.
     unfinished_animations_remain: bool,
@@ -350,14 +358,13 @@ impl FramePacer {
         // more than a refresh ahead cannot anchor either pacing or feedback.
         let refresh = self.clock.refresh_interval();
         let interval = refresh.unwrap_or(FALLBACK_REFRESH_INTERVAL);
-        let mut time = time.filter(|stamp| {
+        let time = time.filter(|stamp| {
             let valid = *stamp <= now.saturating_add(interval);
             if !valid {
                 effects.push(Effect::Anomaly(Anomaly::FlipFarInFuture));
             }
             valid
         });
-        let mut timestamp = time.unwrap_or(now);
         let replaces_held_flip = self.held_flip.take().is_some();
 
         // A software completion has no physical vblank to pace it when the
@@ -367,26 +374,40 @@ impl FramePacer {
         } else {
             Some(interval)
         };
+        let mut timestamp = time.unwrap_or(now);
         if let Some(at) = self.throttle.deadline(pacing_interval, time, now) {
             if at > now {
                 self.cancel_watchdog(effects);
-                self.held_flip = Some(sequence);
+                self.held_flip = Some(HeldFlip {
+                    sequence,
+                    stamp: time,
+                    due: at,
+                });
                 effects.push(Effect::ArmTimer {
                     timer: Timer::Throttle,
                     at,
                 });
                 return;
             }
-            // Dispatch already consumed the whole pacing delay. Deliver as
-            // if the throttle timer had just fired at the dispatch time.
-            timestamp = now;
-            time = None;
+            // The timer would already have elapsed. A late dispatch cannot
+            // change the completed flip's timestamp.
+            timestamp = time.unwrap_or(at);
             self.throttle.throttle(None, now);
         }
         if replaces_held_flip {
             effects.push(Effect::CancelTimer(Timer::Throttle));
         }
 
+        self.present(timestamp, time, sequence, effects);
+    }
+
+    fn present(
+        &mut self,
+        timestamp: Duration,
+        time: Option<Duration>,
+        sequence: u32,
+        effects: &mut Vec<Effect>,
+    ) {
         let redraw_needed = match self.redraw {
             RedrawState::WaitingForVBlank { redraw_needed } => {
                 self.cancel_watchdog(effects);
@@ -453,11 +474,19 @@ impl FramePacer {
                 }
             },
             Timer::Throttle => match self.held_flip {
-                Some(sequence) => {
-                    // Delivered again as a flip with an unknown time; its own
-                    // timer is spent, so it must not be cancelled.
+                Some(held) if now < held.due => effects.push(Effect::ArmTimer {
+                    timer: Timer::Throttle,
+                    at: held.due,
+                }),
+                Some(held) => {
                     self.held_flip = None;
-                    self.flip_completed(now, None, sequence, effects);
+                    self.throttle.throttle(None, now);
+                    self.present(
+                        held.stamp.unwrap_or(held.due),
+                        held.stamp,
+                        held.sequence,
+                        effects,
+                    );
                 }
                 None => effects.push(unexpected),
             },
