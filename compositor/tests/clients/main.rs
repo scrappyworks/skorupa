@@ -127,9 +127,14 @@ impl Fixture {
 
     /// The color of the top left pixel of the last frame, without alpha.
     fn color(&mut self) -> u32 {
+        self.pixel(0, 0)
+    }
+
+    fn pixel(&mut self, x: i32, y: i32) -> u32 {
         let pixels = self.compositor.pixels().unwrap();
         assert_eq!(pixels.len(), usize::try_from(WIDTH * HEIGHT * 4).unwrap());
-        u32::from_ne_bytes(*pixels.first_chunk().unwrap()) | 0xff00_0000
+        let index = usize::try_from(y * WIDTH + x).unwrap();
+        u32::from_ne_bytes(pixels.as_chunks::<4>().0[index]) | 0xff00_0000
     }
 }
 
@@ -200,6 +205,70 @@ fn req_api_001_one_client_tracks_its_windows_on_different_workspaces() {
     assert!(!client.data.on_output(&first.surface));
     assert!(!client.data.on_output(&child));
     assert!(client.data.on_output(&second.surface));
+}
+
+#[test]
+fn req_api_001_scale_only_commit_resizes_the_attached_buffer() {
+    let mut fixture = Fixture::new(config());
+    let background = fixture.color();
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    assert_eq!(fixture.pixel(WIDTH / 2, 0), RED);
+    root.surface.set_buffer_scale(2);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.pixel(WIDTH / 2 - 1, 0), RED);
+    assert_eq!(fixture.pixel(WIDTH / 2, 0), background);
+
+    // A new attachment accompanying a scale change replaces the old one.
+    let replacement = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    root.surface.set_buffer_scale(1);
+    client.commit(&root, Some(&replacement));
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!(fixture.pixel(1, 1), BLUE);
+    assert_eq!(fixture.pixel(2, 0), background);
+}
+
+#[test]
+fn req_api_001_child_buffer_mapping_waits_for_the_parent_commit() {
+    use wayland_client::protocol::wl_output::Transform;
+
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, _role) = client.create_subsurface(&root.surface);
+    let buffer = client.buffer(4, 2, Format::Xrgb8888, BLUE);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.pixel(3, 0), BLUE);
+
+    // The compositor can keep displaying the contents after wl_buffer.destroy.
+    buffer.destroy();
+    child.set_buffer_scale(2);
+    child.set_buffer_transform(Transform::_90);
+    child.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!(fixture.pixel(3, 0), BLUE);
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 3);
+    assert_eq!(fixture.pixel(0, 1), BLUE);
+    assert_eq!(fixture.pixel(1, 0), RED);
+    assert_eq!(fixture.pixel(0, 2), RED);
+
+    child.set_buffer_transform(Transform::Normal);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 4);
+    assert_eq!(fixture.pixel(1, 0), BLUE);
+    assert_eq!(fixture.pixel(0, 1), RED);
 }
 
 #[test]
