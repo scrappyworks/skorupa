@@ -4,9 +4,11 @@
 //! keyboard, `wl_output` and `wp_presentation`, each for every client.
 
 mod admission;
+mod dispatch;
 pub(crate) mod geometry;
 
 use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::FramePacer;
@@ -28,8 +30,8 @@ use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
 use smithay::utils::{Logical, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-    add_pre_commit_hook, with_states,
+    BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SUBSURFACE_ROLE,
+    SurfaceAttributes, add_pre_commit_hook, get_role, with_states,
 };
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::pointer_constraints::PointerConstraintsHandler;
@@ -116,6 +118,7 @@ impl Window {
 #[derive(Default)]
 pub(crate) struct ClientState {
     compositor: CompositorClientState,
+    subsurfaces: AtomicUsize,
 }
 
 impl ClientData for ClientState {}
@@ -465,11 +468,30 @@ impl CompositorHandler for State {
         }
     }
 
+    fn new_subsurface(&mut self, surface: &WlSurface, _: &WlSurface) {
+        // A per-connection bound also bounds every recursive surface-tree walk,
+        // including trees assembled from the leaves towards the root.
+        const MAX_SUBSURFACES: usize = 64;
+        if let Some(client) = surface.client()
+            && let Some(data) = client.get_data::<ClientState>()
+            && data.subsurfaces.fetch_add(1, Ordering::Relaxed) >= MAX_SUBSURFACES
+        {
+            admission::resource_limit_reached(surface, c"too many subsurface roles");
+        }
+    }
+
     fn new_surface(&mut self, surface: &WlSurface) {
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
             state.refuse_oversized_buffer(surface);
             geometry::capture(surface);
         });
+    }
+
+    fn destroyed(&mut self, surface: &WlSurface) {
+        // Destroying a subsurface unmaps it immediately, without a parent commit.
+        if self.session_visible && get_role(surface) == Some(SUBSURFACE_ROLE) {
+            self.queue_redraw();
+        }
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -541,7 +563,10 @@ impl XdgShellHandler for State {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let Some(id) = admission::take_window_id(&mut self.next_window_id, self.windows.len())
         else {
-            admission::window_limit_reached(surface.wl_surface());
+            admission::resource_limit_reached(
+                surface.wl_surface(),
+                c"no toplevel window slots available",
+            );
             return;
         };
         geometry::reset(surface.wl_surface());
@@ -644,8 +669,6 @@ impl OutputHandler for State {}
 // Smithay wants this of every state whose pointer focus is a `wl_surface`;
 // there is no pointer yet.
 impl PointerConstraintsHandler for State {}
-
-smithay::delegate_dispatch2!(State);
 
 #[cfg(test)]
 mod tests {

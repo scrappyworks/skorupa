@@ -1,5 +1,7 @@
 //! Bounds the registered toplevel roles before they reach the layout.
 
+use std::ffi::CStr;
+
 use skorupa_compositor_core::layout::{MAX_WINDOWS, WindowId};
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::__interfaces::WL_DISPLAY_INTERFACE;
@@ -17,7 +19,7 @@ pub(super) fn take_window_id(next: &mut u64, registered: usize) -> Option<Window
 
 /// `wayland-server` handles `wl_display` internally. Report its global `no_memory`
 /// error on the display object itself, so the client decodes the right enum.
-pub(super) fn window_limit_reached(surface: &WlSurface) {
+pub(super) fn resource_limit_reached(surface: &WlSurface, reason: &'static CStr) {
     const DISPLAY_ID: u32 = 1;
     const NO_MEMORY: u32 = 2;
     if let Some(handle) = surface.handle().upgrade()
@@ -25,11 +27,7 @@ pub(super) fn window_limit_reached(surface: &WlSurface) {
         && let Ok(display) =
             handle.object_for_protocol_id(client, &WL_DISPLAY_INTERFACE, DISPLAY_ID)
     {
-        handle.post_error(
-            display,
-            NO_MEMORY,
-            c"no toplevel window slots available".into(),
-        );
+        handle.post_error(display, NO_MEMORY, reason.into());
     }
 }
 
