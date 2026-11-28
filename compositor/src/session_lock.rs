@@ -560,6 +560,30 @@ mod tests {
         assert!(compositor.end_sleep_hold(now, current));
     }
 
+    #[test]
+    fn req_lock_025_resume_during_an_unchanged_cover_redraw_schedules_fresh_presentation() {
+        let (mut compositor, _peer) = covered();
+        let now = BOOT + Duration::from_secs(1);
+        let asleep = Duration::from_secs(60);
+        let resumed = |at: Duration| Clocks::exact(at, at + asleep);
+        let mut samples = [Clocks::exact(now, now); 2].into_iter();
+        compositor.state.queue_redraw();
+        compositor
+            .dispatch_with_clock(now, &mut || samples.next().unwrap_or_else(|| resumed(now)))
+            .unwrap();
+
+        // Any retry must come from the compositor. No client or broker is active.
+        for _ in 0..2 {
+            if compositor.session_phase() == Some(lock::Phase::Locked) {
+                break;
+            }
+            let deadline = compositor.next_deadline().unwrap();
+            compositor.dispatch_at(resumed(now.max(deadline))).unwrap();
+        }
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Locked));
+        assert!(compositor.pending_lock_ui().is_some());
+    }
+
     fn verdict() -> Verdict {
         Verdict {
             compositor_instance: CompositorInstance([3; 16]),
