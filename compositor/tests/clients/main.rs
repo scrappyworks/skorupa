@@ -451,6 +451,91 @@ fn req_perf_012_time_spent_dispatching_counts_towards_the_frame_deadline() {
 }
 
 #[test]
+fn req_proto_004_subsurface_roles_have_a_per_client_budget() {
+    use wayland_client::protocol::wl_display;
+
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = client.create_window();
+    let mut roles: Vec<_> = (0..64)
+        .map(|_| client.create_subsurface(&root.surface))
+        .collect();
+    fixture.sync(&mut client);
+
+    // The wl_surface can disappear first. Destroying the role frees its slot.
+    let (surface, role) = roles.pop().unwrap();
+    surface.destroy();
+    role.destroy();
+    let _last = client.create_subsurface(&root.surface);
+    fixture.sync(&mut client);
+    let mut independent = fixture.connect();
+    let window = independent.create_window();
+    let _child = independent.create_subsurface(&window.surface);
+    fixture.sync(&mut independent);
+
+    let _extra = client.create_subsurface(&root.surface);
+    fixture.exchange(&mut client);
+    let error = client
+        .protocol_error()
+        .expect("all subsurface slots are occupied");
+    assert_eq!(error.object_interface, "wl_display");
+    assert_eq!(error.code, wl_display::Error::NoMemory as u32);
+    fixture.sync(&mut independent);
+}
+
+#[test]
+fn req_api_001_destroyed_subsurface_reveals_the_parent_without_a_commit() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, _role) = client.create_subsurface(&root.surface);
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    assert_eq!(fixture.color(), BLUE);
+    assert_eq!(fixture.compositor.next_deadline(), None);
+
+    child.destroy();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60 * 2);
+    assert_eq!(fixture.color(), RED);
+}
+
+#[test]
+fn req_api_001_destroying_only_the_subsurface_role_retires_its_tree() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, role) = client.create_subsurface(&root.surface);
+    let (leaf, _leaf_role) = client.create_subsurface(&child);
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    leaf.attach(Some(&buffer), 0, 0);
+    leaf.commit();
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    client.read();
+    assert_eq!(fixture.color(), BLUE);
+    assert!(client.data.on_output(&child));
+    assert!(client.data.on_output(&leaf));
+    assert_eq!(fixture.compositor.next_deadline(), None);
+
+    role.destroy();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + 2 * HZ_60);
+    client.read();
+    assert_eq!(fixture.color(), RED);
+    assert!(!client.data.on_output(&child));
+    assert!(!client.data.on_output(&leaf));
+    assert!(client.data.on_output(&root.surface));
+}
+
+#[test]
 fn req_perf_014_frame_below_unmapped_subsurface_does_not_keep_output_awake() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
