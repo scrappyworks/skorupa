@@ -1,4 +1,4 @@
-//! `skorupa-compositor`: the headless compositor.
+//! `skorupa-compositor`: defaults to headless. `--drm` opens the active seat.
 //!
 //! Listens on the next free `wayland-N` socket in `XDG_RUNTIME_DIR`, prints
 //! that name on standard output, and runs until it is killed. This file is
@@ -23,7 +23,11 @@ fn main() -> ExitCode {
 
 fn run() -> Result<Infallible, Box<dyn Error>> {
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
-    let mut compositor = Compositor::new(Config::default())?;
+    let mut compositor = match std::env::args().nth(1).as_deref() {
+        Some("--drm") => Compositor::new_drm(&event_loop.handle())?,
+        None | Some("--headless") => Compositor::new(Config::default())?,
+        Some(_) => return Err("expected --headless or --drm".into()),
+    };
 
     let listener = ListeningSocketSource::new_auto()?;
     println!("{}", listener.socket_name().to_string_lossy());

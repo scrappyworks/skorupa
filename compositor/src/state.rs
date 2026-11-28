@@ -21,7 +21,7 @@ use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::{self, WlSurface};
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
-use smithay::utils::{Logical, Rectangle, SERIAL_COUNTER, Serial, Size};
+use smithay::utils::{Logical, SERIAL_COUNTER, Serial, Size};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
@@ -37,7 +37,8 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use tracing::warn;
 
-use crate::frame::Timers;
+use crate::drm::Drm;
+use crate::frame::{Placement, Timers};
 use crate::headless::Headless;
 use crate::layout::{Layout, WindowId, WorkspaceLayout};
 
@@ -93,6 +94,11 @@ pub(crate) struct ClientState {
 
 impl ClientData for ClientState {}
 
+pub(crate) enum Backend {
+    Headless(Box<Headless>),
+    Drm(Box<Drm>),
+}
+
 pub struct State {
     pub(crate) config: Config,
     compositor: CompositorState,
@@ -105,13 +111,13 @@ pub struct State {
     _output_global: GlobalId,
 
     pub(crate) output: Output,
-    pub(crate) backend: Headless,
+    pub(crate) backend: Backend,
     /// Oldest first.
     pub(crate) windows: Vec<Window>,
     next_window_id: u64,
     layout: Box<dyn Layout>,
     /// What the layout last said: shown windows, bottom to top.
-    pub(crate) placements: Vec<(WindowId, Rectangle<i32, Logical>)>,
+    pub(crate) placements: Vec<Placement>,
     focus: Option<WindowId>,
     workspace_keys: [Option<u32>; 9],
 
@@ -141,10 +147,22 @@ impl State {
         );
         output.set_preferred(mode);
         output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
-        let output_global = output.create_global::<Self>(dh);
+        let backend = Headless::new(&output, mode.size)?;
+        Self::with_backend(dh, config, output, Backend::Headless(Box::new(backend)))
+    }
 
-        let mut backend = Headless::new(&output, mode.size)?;
-        let shm = ShmState::new::<Self>(dh, backend.renderer().shm_formats());
+    pub(crate) fn with_backend(
+        dh: &DisplayHandle,
+        config: Config,
+        output: Output,
+        mut backend: Backend,
+    ) -> Result<Self, Box<dyn Error>> {
+        let formats: Vec<_> = match &mut backend {
+            Backend::Headless(backend) => backend.renderer().shm_formats().collect(),
+            Backend::Drm(backend) => backend.shm_formats()?,
+        };
+        let output_global = output.create_global::<Self>(dh);
+        let shm = ShmState::new::<Self>(dh, formats);
 
         let mut seats = SeatState::new();
         let mut seat = seats.new_wl_seat(dh, "seat0");
@@ -167,7 +185,10 @@ impl State {
             backend,
             windows: Vec::new(),
             next_window_id: 0,
-            layout: Box::new(WorkspaceLayout::new(mode.size.w, mode.size.h)),
+            layout: Box::new(WorkspaceLayout::new(
+                config.output_size.0,
+                config.output_size.1,
+            )),
             placements: Vec::new(),
             focus: None,
             workspace_keys: [None; 9],

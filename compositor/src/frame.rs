@@ -13,11 +13,14 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::{Effect, Event, RedrawState, RenderOutcome, Timer};
-use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
+use smithay::backend::renderer::element::surface::{
+    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+};
 use smithay::backend::renderer::element::{
     Kind, RenderElementStates, default_primary_scanout_output_compare,
 };
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
+use smithay::backend::renderer::{Color32F, ImportAll, Renderer};
 use smithay::desktop::utils::{
     OutputPresentationFeedback, send_frames_surface_tree, surface_primary_scanout_output,
     take_presentation_feedback_surface_tree, update_surface_primary_scanout_output,
@@ -26,13 +29,52 @@ use smithay::desktop::utils::{
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Monotonic, Point};
+use smithay::utils::{Logical, Monotonic, Point, Rectangle};
 use smithay::wayland::compositor::{SurfaceAttributes, SurfaceData, with_states};
 use smithay::wayland::presentation::Refresh;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 use tracing::warn;
 
-use crate::state::State;
+use crate::layout::WindowId;
+use crate::state::{Backend, State, Window};
+
+/// Shown where no window is.
+pub(crate) const BACKGROUND: Color32F = Color32F::new(0.1, 0.1, 0.1, 1.0);
+pub(crate) type Placement = (WindowId, Rectangle<i32, Logical>);
+
+pub(crate) fn elements<R: Renderer + ImportAll>(
+    renderer: &mut R,
+    windows: &[Window],
+    placements: &[Placement],
+) -> Vec<WaylandSurfaceRenderElement<R>>
+where
+    R::TextureId: Clone + 'static,
+{
+    let mut elements = Vec::new();
+    for (id, rect) in placements.iter().rev() {
+        let Some(window) = windows.iter().find(|window| window.id == *id) else {
+            continue;
+        };
+        let surface = window.toplevel.wl_surface();
+        let geometry = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceCachedState>()
+                .current()
+                .geometry
+        });
+        let offset = geometry.map_or_else(Point::default, |geometry| geometry.loc);
+        elements.extend(render_elements_from_surface_tree(
+            renderer,
+            surface,
+            (rect.loc - offset).to_physical(1),
+            1.0,
+            1.0,
+            Kind::Unspecified,
+        ));
+    }
+    elements
+}
 
 /// A surface that is not shown gets a frame callback when its last one is
 /// older than this.
@@ -140,7 +182,9 @@ impl State {
                             animations_remain: false,
                         },
                     );
-                    if outcome == RenderOutcome::Submitted {
+                    if outcome == RenderOutcome::Submitted
+                        && matches!(self.backend, Backend::Headless(_))
+                    {
                         // Nothing to wait for: the image in memory is the screen.
                         self.flips = self.flips.wrapping_add(1);
                         self.pace(
@@ -160,16 +204,22 @@ impl State {
                     time,
                     refresh,
                     sequence,
-                    hw_clock: _,
+                    hw_clock,
                 } => {
                     if let Some(mut feedback) = self.pending_feedback.take() {
                         let refresh = refresh.map_or(Refresh::Unknown, Refresh::Fixed);
-                        // No vsync, hardware clock or hardware completion to claim.
+                        let flags = if hw_clock {
+                            wp_presentation_feedback::Kind::Vsync
+                                | wp_presentation_feedback::Kind::HwClock
+                                | wp_presentation_feedback::Kind::HwCompletion
+                        } else {
+                            wp_presentation_feedback::Kind::empty()
+                        };
                         feedback.presented::<_, Monotonic>(
                             time,
                             refresh,
                             u64::from(sequence),
-                            wp_presentation_feedback::Kind::empty(),
+                            flags,
                         );
                     }
                 }
@@ -185,33 +235,14 @@ impl State {
     }
 
     fn render(&mut self) -> RenderOutcome {
-        let mut elements = Vec::new();
-        // Front to back, as the damage tracker wants them.
-        for (id, rect) in self.placements.iter().rev() {
-            let Some(window) = self.windows.iter().find(|window| window.id == *id) else {
-                continue;
-            };
-            let surface = window.toplevel.wl_surface();
-            // The window geometry, not the buffer, is what fills the rectangle.
-            let geometry = with_states(surface, |states| {
-                states
-                    .cached_state
-                    .get::<SurfaceCachedState>()
-                    .current()
-                    .geometry
-            });
-            let offset = geometry.map_or_else(Point::default, |geometry| geometry.loc);
-            elements.extend(render_elements_from_surface_tree(
-                self.backend.renderer(),
-                surface,
-                (rect.loc - offset).to_physical(1),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ));
-        }
-
-        match self.backend.render(&elements) {
+        let rendered = match &mut self.backend {
+            Backend::Headless(backend) => {
+                let elements = elements(backend.renderer(), &self.windows, &self.placements);
+                backend.render(&elements)
+            }
+            Backend::Drm(backend) => backend.render(&self.windows, &self.placements),
+        };
+        match rendered {
             Ok((damaged, states)) => {
                 self.update_primary_scanout_output(&states);
                 if damaged {
@@ -224,6 +255,44 @@ impl State {
             Err(err) => {
                 warn!(%err, "rendering the frame failed");
                 RenderOutcome::Failed
+            }
+        }
+    }
+
+    pub(crate) fn complete_drm(&mut self, now: Duration, time: Option<Duration>, sequence: u32) {
+        if let Backend::Drm(backend) = &mut self.backend
+            && backend.complete()
+        {
+            self.pace(
+                now,
+                Event::FlipCompleted {
+                    now,
+                    time,
+                    sequence,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn pause_drm(&mut self) {
+        if let Backend::Drm(backend) = &mut self.backend {
+            backend.pause();
+            self.pacer = skorupa_compositor_core::frame_clock::FramePacer::new(
+                self.config.refresh_interval(),
+                self.config.flip_timeout,
+            );
+            self.timers = Timers::default();
+            if let Some(mut feedback) = self.pending_feedback.take() {
+                feedback.discarded();
+            }
+        }
+    }
+
+    pub(crate) fn activate_drm(&mut self) {
+        if let Backend::Drm(backend) = &mut self.backend {
+            match backend.activate() {
+                Ok(()) => self.queue_redraw(),
+                Err(err) => warn!(%err, "could not activate the DRM output"),
             }
         }
     }
