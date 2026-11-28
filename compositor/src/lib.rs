@@ -103,13 +103,18 @@ impl Compositor {
     }
 
     /// Relays a trusted bridge's report that it has rearmed its inhibitor.
-    /// Returns whether the reported hold is over. If it is still current,
-    /// the bridge can retry with a fresh clock sample.
+    /// Returns true once the installed lock has left the sleep hold. On false,
+    /// retry with a fresh clock sample only when [`Self::sleep_hold_token`]
+    /// still returns `token`. A different token belongs to a later hold and
+    /// requires a fresh inhibitor and sleep-state check before reporting.
     #[must_use]
     pub fn end_sleep_hold(&mut self, now: Clocks, token: lock::HoldToken) -> bool {
         self.state
             .lock_event_at(now, lock::Event::SleepOver { token });
-        self.sleep_hold_token().is_none()
+        self.state
+            .session_lock
+            .as_ref()
+            .is_some_and(SessionLock::sleep_hold_over)
     }
 
     /// The prompt serial and earliest monotonic time for its trusted adapter.
