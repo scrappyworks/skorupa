@@ -290,3 +290,46 @@ fn req_lock_010_only_the_active_seat_rechecks_a_dark_output_immediately() {
     }
     assert!(!OutputPower::On.off_on_active_seat(true));
 }
+
+#[test]
+fn req_perf_003_mode_selection_keeps_raw_refresh_and_skips_invalid_timings() {
+    let raw = drm_ffi::drm_mode_modeinfo {
+        clock: 148_352,
+        hdisplay: 1920,
+        vdisplay: 1080,
+        htotal: 2200,
+        vtotal: 1125,
+        ..drm_ffi::drm_mode_modeinfo::default()
+    };
+    let preferred = ModeTypeFlags::PREFERRED.bits();
+    let invalid = DrmMode::from(drm_ffi::drm_mode_modeinfo {
+        htotal: 0,
+        type_: preferred,
+        ..raw
+    });
+    let usable = DrmMode::from(raw);
+    // REQ-LAYOUT-018: a mode preferred by KMS must fit the layout as well.
+    for (w, h) in [(16_385, 1080), (1920, 16_385)] {
+        let oversized = DrmMode::from(drm_ffi::drm_mode_modeinfo {
+            hdisplay: w,
+            vdisplay: h,
+            htotal: w + 20,
+            vtotal: h + 20,
+            type_: preferred,
+            ..raw
+        });
+        assert_eq!(select_mode(&[oversized, usable]).unwrap().0, usable);
+    }
+    assert!(select_mode(&[invalid]).is_none());
+    let (chosen, interval) = select_mode(&[invalid, usable]).unwrap();
+    assert_eq!(chosen, usable);
+    assert_eq!(Mode::from(chosen).refresh, 59_940);
+    assert_eq!(interval, Duration::from_nanos(16_683_294));
+
+    let faster = DrmMode::from(drm_ffi::drm_mode_modeinfo {
+        clock: 148_500,
+        type_: preferred,
+        ..raw
+    });
+    assert_eq!(select_mode(&[usable, faster]).unwrap().0, faster);
+}

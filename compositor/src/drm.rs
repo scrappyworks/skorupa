@@ -1,7 +1,10 @@
 //! One connector on the logind seat, through Smithay's safe GBM/GLES backend.
 
 use std::error::Error;
+use std::time::Duration;
 
+use skorupa_compositor_core::frame_clock::{ModeTimings, refresh_interval};
+use skorupa_compositor_core::layout::MAX_OUTPUT_SIDE;
 use skorupa_compositor_core::lock::Content;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::format::FormatSet;
@@ -24,7 +27,9 @@ use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
-use smithay::reexports::drm::control::{Device, ModeTypeFlags, connector, crtc};
+use smithay::reexports::drm::control::{
+    Device, Mode as DrmMode, ModeFlags, ModeTypeFlags, connector, crtc,
+};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::protocol::wl_shm::Format;
@@ -44,6 +49,7 @@ pub(crate) struct Drm {
     surface: DrmOutput<Allocator, Exporter, Content, DrmDeviceFd>,
     gpu: GpuManager<Api>,
     node: DrmNode,
+    pub(crate) refresh_interval: Duration,
     active: bool,
     power: OutputPower,
     frames: DrmFrames,
@@ -183,39 +189,62 @@ pub(crate) struct Devices {
     crtc: crtc::Handle,
 }
 
-fn select_connector(
-    drm: &DrmDevice,
-) -> Result<
-    (
-        connector::Info,
-        crtc::Handle,
-        smithay::reexports::drm::control::Mode,
-    ),
-    Box<dyn Error>,
-> {
+fn select_mode(modes: &[DrmMode]) -> Option<(DrmMode, Duration)> {
+    modes
+        .iter()
+        .filter_map(|&mode| {
+            let (w, h) = mode.size();
+            if ![w, h]
+                .into_iter()
+                .all(|n| (1..=MAX_OUTPUT_SIDE).contains(&i32::from(n)))
+            {
+                return None;
+            }
+            // Mode::from for wl_output divides by the scan totals. Validate the
+            // raw mode first and keep its interval before the wire rounds to mHz.
+            let interval = refresh_interval(ModeTimings {
+                clock_khz: mode.clock(),
+                htotal: mode.hsync().2,
+                vtotal: mode.vsync().2,
+                vscan: mode.vscan(),
+                interlace: mode.flags().contains(ModeFlags::INTERLACE),
+                double_scan: mode.flags().contains(ModeFlags::DBLSCAN),
+            })?;
+            Some((mode, interval))
+        })
+        .min_by_key(|(mode, _)| !mode.mode_type().contains(ModeTypeFlags::PREFERRED))
+}
+
+struct SelectedOutput {
+    connector: connector::Info,
+    crtc: crtc::Handle,
+    mode: DrmMode,
+    interval: Duration,
+}
+
+fn select_connector(drm: &DrmDevice) -> Result<SelectedOutput, Box<dyn Error>> {
     let resources = drm.resource_handles()?;
-    let (connector, crtc) = resources
+    resources
         .connectors()
         .iter()
         .filter_map(|handle| drm.get_connector(*handle, true).ok())
-        .filter(|info| info.state() == connector::State::Connected && !info.modes().is_empty())
-        .find_map(|info| {
-            let crtc = info
+        .filter(|info| info.state() == connector::State::Connected)
+        .find_map(|connector| {
+            let (mode, interval) = select_mode(connector.modes())?;
+            let crtc = connector
                 .encoders()
                 .iter()
                 .filter_map(|encoder| drm.get_encoder(*encoder).ok())
                 .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
                 .next()?;
-            Some((info, crtc))
+            Some(SelectedOutput {
+                connector,
+                crtc,
+                mode,
+                interval,
+            })
         })
-        .ok_or("no connected connector with a usable CRTC")?;
-    let mode = connector
-        .modes()
-        .iter()
-        .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .copied()
-        .unwrap_or(connector.modes()[0]);
-    Ok((connector, crtc, mode))
+        .ok_or_else(|| "no connected connector with a usable mode and CRTC".into())
 }
 
 impl Drm {
@@ -242,7 +271,12 @@ impl Drm {
             GpuManager::<Api>::new(GbmGlesBackend::default()).map_err(|err| err.to_string())?;
         gpu.as_mut().add_node(node, gbm.clone())?;
 
-        let (connector, crtc, mode) = select_connector(&drm)?;
+        let SelectedOutput {
+            connector,
+            crtc,
+            mode,
+            interval,
+        } = select_connector(&drm)?;
         let wl_mode = Mode::from(mode);
         let (width, height) = connector.size().unwrap_or_default();
         let output = Output::new(
@@ -309,6 +343,7 @@ impl Drm {
             gpu,
             node,
             active: true,
+            refresh_interval: interval,
             frames: DrmFrames::default(),
             power: OutputPower::On,
         };

@@ -189,9 +189,12 @@ impl State {
         output: Output,
         mut backend: Backend,
     ) -> Result<Self, Box<dyn Error>> {
-        let formats: Vec<_> = match &mut backend {
-            Backend::Headless(backend) => backend.renderer().shm_formats().collect(),
-            Backend::Drm(backend) => backend.shm_formats()?,
+        let (formats, interval): (Vec<_>, _) = match &mut backend {
+            Backend::Headless(backend) => (
+                backend.renderer().shm_formats().collect(),
+                config.refresh_interval(),
+            ),
+            Backend::Drm(backend) => (backend.shm_formats()?, Some(backend.refresh_interval)),
         };
         let output_global = output.create_global::<Self>(dh);
         let shm = ShmState::new::<Self>(dh, formats);
@@ -225,7 +228,7 @@ impl State {
             workspace_keys: [None; 9],
             session_visible: true,
             session_lock: None,
-            pacer: FramePacer::new(config.refresh_interval(), config.flip_timeout),
+            pacer: FramePacer::new(interval, config.flip_timeout),
             timers: Timers::default(),
             pending_feedback: None,
             flips: 0,

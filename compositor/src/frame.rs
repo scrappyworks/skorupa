@@ -564,7 +564,7 @@ impl State {
 
     fn reset_frame_clock(&mut self) {
         self.pacer = skorupa_compositor_core::frame_clock::FramePacer::new(
-            self.config.refresh_interval(),
+            self.pacer.refresh_interval(),
             self.config.flip_timeout,
         );
         self.timers = Timers::default();
@@ -724,6 +724,23 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn req_perf_003_reset_keeps_the_exact_mode_interval() {
+        let mut compositor = crate::Compositor::new(crate::Config {
+            refresh_mhz: 59_940,
+            ..crate::Config::default()
+        })
+        .unwrap();
+        // 148.352 MHz and 2200 by 1125 total pixels.
+        let interval = Some(Duration::from_nanos(16_683_294));
+        compositor.state.pacer = skorupa_compositor_core::frame_clock::FramePacer::new(
+            interval,
+            compositor.state.config.flip_timeout,
+        );
+        compositor.state.reset_frame_clock();
+        assert_eq!(compositor.state.pacer.refresh_interval(), interval);
+    }
 
     #[test]
     fn req_lock_011_blanking_retries_are_bounded_and_rearm_on_recovery() {
