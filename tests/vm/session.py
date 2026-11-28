@@ -36,6 +36,10 @@ def verify_screen(name: str, color: tuple[int, int, int]) -> None:
 
 start_client(1)
 verify_screen("first-workspace", (197, 42, 55))
+# REQ-PERF-015: the virtual KMS connector supplies no hardware provenance.
+machine.wait_until_succeeds(f"test -s {runtime_dir}/client-1.feedback", timeout=timedelta(seconds=10))
+flags = int(machine.succeed(f"cat {runtime_dir}/client-1.feedback"))
+assert flags & 0x7 == 0, f"unexpected vsync, hw_clock or hw_completion flags: {flags:#x}"
 start_client(2)
 verify_screen("first-remains-visible", (197, 42, 55))
 

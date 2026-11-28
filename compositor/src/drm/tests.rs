@@ -182,11 +182,39 @@ fn render_session(state: &mut State) -> frame::RenderedFrame {
     )
 }
 
+fn present_session_frame(
+    state: &mut State,
+    rendered: frame::RenderedFrame,
+    stamp: Duration,
+    sequence: u32,
+) {
+    use skorupa_compositor_core::frame_clock::{Event, RenderOutcome};
+    // Mirror the queued submission before exercising the KMS completion and
+    // the feedback that the client receives over its real Wayland connection.
+    let mut pacer = state.pacer.clone();
+    for event in [
+        Event::QueueRedraw,
+        Event::Redraw { now: stamp },
+        Event::Rendered {
+            now: stamp,
+            outcome: RenderOutcome::Submitted,
+            animations_remain: false,
+        },
+    ] {
+        pacer = pacer.step(event).0;
+    }
+    state.pacer = pacer;
+    state.pending_feedback = rendered.feedback;
+    state.presented_drm(
+        stamp + Duration::from_millis(1),
+        Some(stamp),
+        sequence,
+        Content::Session,
+    );
+}
+
 #[test]
 fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
-    use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
-    use smithay::utils::Monotonic;
-    use smithay::wayland::presentation::Refresh;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
     use wayland_client::protocol::wl_shm;
@@ -223,31 +251,45 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
     frames.queue_redraw();
     signaled.store(true, Ordering::Relaxed);
     let first = frames.submit(|_, _| Ok(())).unwrap();
-    first.feedback.unwrap().presented::<_, Monotonic>(
-        Duration::from_secs(1),
-        Refresh::Unknown,
-        1,
-        Kind::empty(),
-    );
+    let first_stamp = Duration::from_millis(999);
+    present_session_frame(&mut compositor.state, first, first_stamp, 1);
     exchange(&mut compositor, &mut client);
     assert_eq!(client.data.discarded, 0);
     assert_eq!(client.data.presented.len(), 1);
 
     let second = render_session(&mut compositor.state);
-    second.feedback.unwrap().presented::<_, Monotonic>(
-        Duration::from_secs(2),
-        Refresh::Unknown,
-        2,
-        Kind::empty(),
-    );
+    let second_stamp = Duration::from_millis(1999);
+    present_session_frame(&mut compositor.state, second, second_stamp, 2);
     exchange(&mut compositor, &mut client);
     assert_eq!(
         client
             .data
             .presented
             .iter()
-            .map(|feedback| feedback.sequence)
+            .map(|feedback| (feedback.sequence, feedback.time, feedback.flags))
             .collect::<Vec<_>>(),
-        [1, 2]
+        [(1, first_stamp, 0), (2, second_stamp, 0)]
     );
+}
+
+#[test]
+fn req_perf_012_virtual_connector_uses_software_pacing_even_with_a_kernel_stamp() {
+    use connector::Interface::{EmbeddedDisplayPort, Virtual};
+    let stamp = Duration::from_secs(1);
+    assert_eq!(
+        presentation_sample(Virtual, Some(DrmEventTime::Monotonic(stamp))),
+        None
+    );
+    assert_eq!(
+        presentation_sample(EmbeddedDisplayPort, Some(DrmEventTime::Monotonic(stamp))),
+        Some(stamp)
+    );
+    assert_eq!(
+        presentation_sample(
+            EmbeddedDisplayPort,
+            Some(DrmEventTime::Realtime(std::time::UNIX_EPOCH))
+        ),
+        None
+    );
+    assert_eq!(presentation_sample(EmbeddedDisplayPort, None), None);
 }
