@@ -285,6 +285,28 @@ fn wake_with_queued_flip(
     // Queue the wake while the old completion is still held by the notifier.
     compositor.key_at(38, true, read_lock_clocks());
     expect_lock(compositor, Phase::Locked)?;
+
+    // REQ-LOCK-002/015: a clock sample that may span a resume voids the
+    // previous confirmation. Keep the pending wake while KMS reconfirms off.
+    let now = read_lock_clocks();
+    let uncertain = Clocks::bracketed(
+        now.boottime,
+        now.monotonic,
+        now.boottime + Duration::from_secs(10),
+    );
+    compositor.request_lock(uncertain);
+    expect_lock(compositor, Phase::Locking)?;
+    let end = now.monotonic + Duration::from_secs(1);
+    while compositor.session_phase() == Some(Phase::Locking) {
+        let now = read_lock_clocks();
+        if now.monotonic > end {
+            return Err("the new lock did not confirm the already dark output".into());
+        }
+        compositor.dispatch(now.monotonic)?;
+        thread::sleep(CONTROL_POLL);
+    }
+    expect_lock(compositor, Phase::Locked)?;
+
     for _ in 0..100 {
         event_loop.dispatch(Some(CONTROL_POLL), compositor)?;
         if compositor.session_phase() == Some(Phase::Locking) {
