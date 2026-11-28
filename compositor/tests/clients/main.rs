@@ -324,6 +324,41 @@ fn req_layout_004_dialog_chooses_its_size_and_is_centered_over_its_parent() {
     }
 }
 
+#[test]
+fn req_api_001_mode_requests_follow_the_initial_configure_handshake() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = client.create_role(None);
+    window.toplevel.set_maximized();
+    window.toplevel.set_fullscreen(None);
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.len(), 0);
+    window.surface.commit();
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.len(), 1);
+    assert_eq!(client.data.configures[0].size, (WIDTH, HEIGHT));
+}
+
+#[test]
+fn req_api_001_unsetting_toplevel_modes_always_answers_with_layout_state() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, RED);
+    let previous = client.data.configures.len();
+    window.toplevel.unset_fullscreen();
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.len(), previous + 1);
+    window.toplevel.unset_maximized();
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.len(), previous + 2);
+    for configure in &client.data.configures[previous..] {
+        assert_eq!(configure.size, (WIDTH, HEIGHT));
+        assert!(configure.activated());
+        assert!(!configure.states.contains(&xdg_toplevel::State::Fullscreen));
+        assert!(!configure.states.contains(&xdg_toplevel::State::Maximized));
+    }
+}
+
 /// A client that commits a new buffer on every frame callback. The headless
 /// backend completes a flip at once, so the pacing is the reducer's alone.
 fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {
