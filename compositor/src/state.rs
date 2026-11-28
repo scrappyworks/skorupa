@@ -157,8 +157,6 @@ pub struct State {
     pub(crate) timers: Timers,
     /// Feedback of the frame that was submitted and whose flip is awaited.
     pub(crate) pending_feedback: Option<OutputPresentationFeedback>,
-    /// Flips completed so far; headless has no hardware counter.
-    pub(crate) flips: u32,
 }
 
 impl State {
@@ -231,7 +229,6 @@ impl State {
             pacer: FramePacer::new(interval, config.flip_timeout),
             timers: Timers::default(),
             pending_feedback: None,
-            flips: 0,
         };
         // The first frame shows the background before any client commits.
         state.queue_redraw();

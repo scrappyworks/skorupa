@@ -210,7 +210,22 @@ impl Compositor {
     /// When reading from or writing to the clients fails as a whole; a
     /// single broken client is disconnected instead.
     pub fn dispatch(&mut self, now: Duration) -> Result<(), Box<dyn Error>> {
-        self.dispatch_with_clock(now, &mut read_lock_clocks)
+        self.dispatch_from_clock(now, || now)
+    }
+
+    fn dispatch_from_clock(
+        &mut self,
+        start: Duration,
+        mut monotonic: impl FnMut() -> Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.state.session_lock.is_some() {
+            self.dispatch_with_clock(start, &mut read_lock_clocks)
+        } else {
+            self.dispatch_with_clock(start, &mut || {
+                let now = monotonic();
+                Clocks::exact(now, now)
+            })
+        }
     }
 
     /// Dispatches clients, authentication and presentation with supplied clocks.
@@ -254,7 +269,7 @@ impl Compositor {
         &mut self,
         mut now: impl FnMut() -> Duration,
     ) -> Result<Option<Duration>, Box<dyn Error>> {
-        self.dispatch(now())?;
+        self.dispatch_from_clock(now(), &mut now)?;
         Ok(self
             .next_deadline()
             .map(|deadline| deadline.saturating_sub(now())))
