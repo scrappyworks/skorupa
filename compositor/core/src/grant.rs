@@ -87,6 +87,26 @@ pub struct Request {
     pub ttl: Duration,
 }
 
+impl Request {
+    /// Decide admission before retaining the request in the consent queue.
+    fn denial_reason(self, unlocked: bool, agent_capture: bool, queued: usize) -> Option<Cause> {
+        if !unlocked {
+            Some(Cause::Lock)
+        } else if (self.kind == Kind::AgentCapture && !agent_capture)
+            || (self.kind.is_agent() && self.target == Target::Screen)
+        {
+            // REQ-AGENT-001: in v1 the user is not even asked.
+            Some(Cause::NotOffered)
+        } else if self.ttl.is_zero() {
+            Some(Cause::Expired)
+        } else if queued >= MAX_QUEUED {
+            Some(Cause::Full)
+        } else {
+            None
+        }
+    }
+}
+
 /// One consent prompt. Numbers restart with the compositor, so the instance
 /// is part of the name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -427,20 +447,8 @@ impl State {
                 effects.push(Effect::FreezeAgents);
             }
             Event::Requested(request) => {
-                let cause = if !lock.unlocked {
-                    Some(Cause::Lock)
-                } else if (request.kind == Kind::AgentCapture && !self.agent_capture)
-                    || (request.kind.is_agent() && request.target == Target::Screen)
-                {
-                    // REQ-AGENT-001: in v1 the user is not even asked.
-                    Some(Cause::NotOffered)
-                } else if request.ttl.is_zero() {
-                    Some(Cause::Expired)
-                } else if self.queue.len() >= MAX_QUEUED {
-                    Some(Cause::Full)
-                } else {
-                    None
-                };
+                let cause =
+                    request.denial_reason(lock.unlocked, self.agent_capture, self.queue.len());
                 match cause {
                     Some(cause) => effects.push(Effect::Denied { request, cause }),
                     None => self.queue.push_back(request),
@@ -552,3 +560,6 @@ pub fn step(mut state: State, mut input: Input) -> (State, Vec<Effect>) {
     debug_assert!(lock.unlocked || (state.grants.is_empty() && state.prompt.is_none()));
     (state, effects)
 }
+
+#[cfg(kani)]
+mod proofs;

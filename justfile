@@ -86,7 +86,11 @@ prove-protocol:
 
 # Prove the broker verdict binding and one-use decision for the lock reducer.
 prove-unlock:
-    cargo kani --manifest-path compositor/Cargo.toml -p skorupa-compositor-core --lib --output-format terse
+    cargo kani --manifest-path compositor/Cargo.toml -p skorupa-compositor-core --lib --harness "lock::proofs::" --output-format terse
+
+# Verify admission at the consent queue boundary and targeted grant revocation.
+prove-grants:
+    cargo kani --manifest-path compositor/Cargo.toml -p skorupa-compositor-core --lib --harness "grant::proofs::" --output-format terse
 
 # Everything available in the Nix development shell.
 check-all: check flake-check
