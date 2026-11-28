@@ -16,6 +16,10 @@ pub trait Layout {
 pub(crate) struct WorkspaceLayout(Reducer);
 
 impl WorkspaceLayout {
+    pub(crate) fn parent(&self, window: WindowId) -> Option<WindowId> {
+        self.0.parent(window)
+    }
+
     pub(crate) fn new(width: i32, height: i32) -> Self {
         Self(Reducer::new(
             Size {

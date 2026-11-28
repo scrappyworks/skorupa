@@ -769,24 +769,36 @@ impl Layout {
         };
         self.mru.retain(|&other| other != window);
 
-        // Its dialogs go to its parent. A tile has none: its first dialog
-        // takes the slot and the others follow that one.
-        let orphan =
-            |(id, state): (&WindowId, &Window)| (state.parent == Some(window)).then_some(*id);
-        let orphans: Vec<WindowId> = self.windows.iter().filter_map(orphan).collect();
-        let heir = gone.parent.or(orphans.first().copied());
-        for orphan in orphans {
-            if let Some(state) = self.windows.get_mut(&orphan) {
-                state.parent = heir.filter(|&heir| heir != orphan);
+        // xdg-shell gives each direct child the unmapped window's parent.
+        // If a tile goes, keep the focused branch in its slot. Each other
+        // newly independent branch gets a workspace below it.
+        let focused_branch = self.workspaces[home].focus.and_then(|focus| {
+            self.chain(focus)
+                .find(|id| self.parent(*id) == Some(window))
+        });
+        let mut orphans = Vec::new();
+        for (&id, state) in &mut self.windows {
+            if state.parent == Some(window) {
+                state.parent = gone.parent;
+                orphans.push(id);
             }
         }
+
         let ws = &mut self.workspaces[home];
-        if gone.parent.is_none() {
-            let replace = |&tile: &WindowId| if tile == window { heir } else { Some(tile) };
-            ws.tiles = ws.tiles.iter().filter_map(replace).collect();
-        }
         if ws.focus == Some(window) {
             ws.focus = gone.parent;
+        }
+        if gone.parent.is_none() {
+            let heir = focused_branch.or(orphans.first().copied());
+            let replace = |&tile: &WindowId| if tile == window { heir } else { Some(tile) };
+            ws.tiles = ws.tiles.iter().filter_map(replace).collect();
+            for (offset, orphan) in orphans
+                .into_iter()
+                .filter(|&id| Some(id) != heir)
+                .enumerate()
+            {
+                self.insert_workspace(home + 1 + offset, vec![orphan], Some(orphan));
+            }
         }
     }
 

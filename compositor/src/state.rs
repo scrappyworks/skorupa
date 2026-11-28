@@ -145,7 +145,7 @@ pub struct State {
     /// Oldest first.
     pub(crate) windows: Vec<Window>,
     next_window_id: u64,
-    layout: Box<dyn Layout>,
+    layout: WorkspaceLayout,
     /// What the layout last said: shown windows, bottom to top.
     pub(crate) placements: Vec<Placement>,
     focus: Option<WindowId>,
@@ -219,10 +219,7 @@ impl State {
             backend,
             windows: Vec::new(),
             next_window_id: 0,
-            layout: Box::new(WorkspaceLayout::new(
-                config.output_size.0,
-                config.output_size.1,
-            )),
+            layout: WorkspaceLayout::new(config.output_size.0, config.output_size.1),
             placements: Vec::new(),
             focus: None,
             workspace_keys: [None; 9],
@@ -277,6 +274,28 @@ impl State {
             .iter()
             .find(|window| window.mapped && *window.toplevel.wl_surface() == parent)
             .map(|window| window.id)
+    }
+
+    fn inherit_parent(&self, id: WindowId, surface: &WlSurface) {
+        // Smithay has reset the unmapped role by commit time. The layout
+        // still knows its former parent. Update the Wayland roles too,
+        // including children which have not attached their first buffer.
+        let parent = self.layout.parent(id).and_then(|id| {
+            self.windows
+                .iter()
+                .find(|w| w.id == id)
+                .map(|w| w.toplevel.wl_surface())
+        });
+        for window in &self.windows {
+            with_states(window.toplevel.wl_surface(), |states| {
+                if let Some(data) = states.data_map.get::<XdgToplevelSurfaceData>()
+                    && let Ok(mut role) = data.lock()
+                    && role.parent.as_ref() == Some(surface)
+                {
+                    role.parent = parent.cloned();
+                }
+            });
+        }
     }
 
     fn initial_size(&self, surface: &ToplevelSurface) -> Option<Size<i32, Logical>> {
@@ -523,6 +542,7 @@ impl CompositorHandler for State {
                         valid_token: false,
                     }
                 } else {
+                    self.inherit_parent(id, surface);
                     Event::Unmap(id)
                 };
                 self.layout_event(event);
@@ -649,6 +669,7 @@ impl XdgShellHandler for State {
         let window = self.windows.remove(index);
         output_update(&self.output, None, surface.wl_surface());
         if window.mapped {
+            self.inherit_parent(window.id, window.toplevel.wl_surface());
             self.layout_event(Event::Unmap(window.id));
         }
     }
