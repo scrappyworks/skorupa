@@ -13,6 +13,7 @@ use std::cell::Cell;
 use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::{Effect, Event, RedrawState, RenderOutcome, Timer};
+use skorupa_compositor_core::lock::{Content, Event as LockEvent};
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
@@ -35,12 +36,22 @@ use smithay::wayland::presentation::Refresh;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 use tracing::warn;
 
+use crate::drm::DrmFlip;
 use crate::layout::WindowId;
 use crate::state::{Backend, State, Window};
 
 /// Shown where no window is.
 pub(crate) const BACKGROUND: Color32F = Color32F::new(0.1, 0.1, 0.1, 1.0);
+// REQ-LOCK-014: compositor-owned fallback even when no lock UI is available.
+pub(crate) const PROTECTED_BACKGROUND: Color32F = Color32F::new(0.0, 0.0, 0.0, 1.0);
 pub(crate) type Placement = (WindowId, Rectangle<i32, Logical>);
+
+pub(crate) fn background(content: Content) -> Color32F {
+    match content {
+        Content::Session => BACKGROUND,
+        Content::Protected => PROTECTED_BACKGROUND,
+    }
+}
 
 pub(crate) fn elements<R: Renderer + ImportAll>(
     renderer: &mut R,
@@ -173,28 +184,41 @@ impl State {
             match effect {
                 Effect::Render { .. } => {
                     // Nothing animates yet, so the target time has no user.
-                    let outcome = self.render();
+                    let content = if self.session_visible() {
+                        Content::Session
+                    } else {
+                        Content::Protected
+                    };
+                    let outcome = self.render(content);
+                    let retry = outcome == RenderOutcome::Failed && content == Content::Protected;
+                    if outcome == RenderOutcome::Failed {
+                        // The pacer is already rendering. Its estimated vblank
+                        // below will pace protected retries.
+                        self.lock_event(LockEvent::RenderFailed);
+                    }
                     self.pace(
                         now,
                         Event::Rendered {
                             now,
                             outcome,
-                            animations_remain: false,
+                            animations_remain: retry,
                         },
                     );
-                    if outcome == RenderOutcome::Submitted
-                        && matches!(self.backend, Backend::Headless(_))
-                    {
-                        // Nothing to wait for: the image in memory is the screen.
-                        self.flips = self.flips.wrapping_add(1);
-                        self.pace(
-                            now,
-                            Event::FlipCompleted {
+                    if outcome == RenderOutcome::Submitted {
+                        self.lock_event(LockEvent::FrameSubmitted(content));
+                        if matches!(self.backend, Backend::Headless(_)) {
+                            // Nothing to wait for: the image in memory is the screen.
+                            self.lock_event(LockEvent::FramePresented(content));
+                            self.flips = self.flips.wrapping_add(1);
+                            self.pace(
                                 now,
-                                time: None,
-                                sequence: self.flips,
-                            },
-                        );
+                                Event::FlipCompleted {
+                                    now,
+                                    time: None,
+                                    sequence: self.flips,
+                                },
+                            );
+                        }
                     }
                 }
                 Effect::ArmTimer { timer, at } => *self.timers.slot(timer) = Some(at),
@@ -207,6 +231,10 @@ impl State {
                     hw_clock,
                 } => {
                     if let Some(mut feedback) = self.pending_feedback.take() {
+                        if !self.session_visible() {
+                            feedback.discarded();
+                            continue;
+                        }
                         let refresh = refresh.map_or(Refresh::Unknown, Refresh::Fixed);
                         let flags = if hw_clock {
                             wp_presentation_feedback::Kind::Vsync
@@ -225,29 +253,47 @@ impl State {
                 }
                 Effect::FlipTimedOut => {
                     warn!("flip did not complete; the frame counts as lost");
-                    if let Some(mut feedback) = self.pending_feedback.take() {
-                        feedback.discarded();
+                    self.discard_pending_feedback();
+                    if let Backend::Drm(backend) = &mut self.backend {
+                        backend.expire_flip();
                     }
+                    self.lock_event(LockEvent::FlipFailed);
                 }
                 Effect::Anomaly(anomaly) => warn!(?anomaly, "frame pacer anomaly"),
             }
         }
     }
 
-    fn render(&mut self) -> RenderOutcome {
+    fn render(&mut self, content: Content) -> RenderOutcome {
+        let protected = content == Content::Protected;
+        let force_full_redraw = protected
+            && self
+                .session_lock
+                .as_ref()
+                .is_some_and(crate::session_lock::SessionLock::needs_cover_frame);
+        let placements = if protected { &[][..] } else { &self.placements };
         let rendered = match &mut self.backend {
             Backend::Headless(backend) => {
-                let elements = elements(backend.renderer(), &self.windows, &self.placements);
-                backend.render(&elements)
+                let elements = elements(backend.renderer(), &self.windows, placements);
+                backend.render_scene(&elements, background(content), force_full_redraw)
             }
-            Backend::Drm(backend) => backend.render(&self.windows, &self.placements),
+            Backend::Drm(backend) => {
+                if !backend.ready_to_render() {
+                    return RenderOutcome::Skipped;
+                }
+                backend.render(&self.windows, placements, content, force_full_redraw)
+            }
         };
         match rendered {
             Ok((damaged, states)) => {
                 self.update_primary_scanout_output(&states);
                 if damaged {
-                    self.pending_feedback = Some(self.take_presentation_feedback());
+                    if !protected {
+                        self.pending_feedback = Some(self.take_presentation_feedback());
+                    }
                     RenderOutcome::Submitted
+                } else if force_full_redraw {
+                    RenderOutcome::Failed
                 } else {
                     RenderOutcome::NoDamage
                 }
@@ -260,40 +306,62 @@ impl State {
     }
 
     pub(crate) fn complete_drm(&mut self, now: Duration, time: Option<Duration>, sequence: u32) {
-        if let Backend::Drm(backend) = &mut self.backend
-            && backend.complete()
-        {
-            self.pace(
-                now,
-                Event::FlipCompleted {
+        let Backend::Drm(backend) = &mut self.backend else {
+            return;
+        };
+        match backend.complete() {
+            DrmFlip::Presented(content) => {
+                // REQ-LOCK-002: actual KMS completion, before the pacer may throttle it.
+                self.lock_event(LockEvent::FramePresented(content));
+                self.pace(
                     now,
-                    time,
-                    sequence,
-                },
-            );
+                    Event::FlipCompleted {
+                        now,
+                        time,
+                        sequence,
+                    },
+                );
+            }
+            DrmFlip::Expired if backend.ready_to_render() => self.queue_redraw(),
+            DrmFlip::Expired | DrmFlip::Ignored => {}
         }
     }
 
     pub(crate) fn pause_drm(&mut self) {
         if let Backend::Drm(backend) = &mut self.backend {
             backend.pause();
+            // Losing the seat invalidates a pending flip as lock evidence.
+            // The kernel has not confirmed the output is off.
+            self.lock_event(LockEvent::FlipFailed);
             self.pacer = skorupa_compositor_core::frame_clock::FramePacer::new(
                 self.config.refresh_interval(),
                 self.config.flip_timeout,
             );
             self.timers = Timers::default();
-            if let Some(mut feedback) = self.pending_feedback.take() {
-                feedback.discarded();
-            }
+            self.discard_pending_feedback();
         }
     }
 
     pub(crate) fn activate_drm(&mut self) {
         if let Backend::Drm(backend) = &mut self.backend {
             match backend.activate() {
-                Ok(()) => self.queue_redraw(),
+                Ok(()) => {
+                    self.lock_event(LockEvent::OutputOn);
+                    self.queue_redraw();
+                }
                 Err(err) => warn!(%err, "could not activate the DRM output"),
             }
+        }
+    }
+
+    pub(crate) fn fence_frame_feedback(&mut self) {
+        self.timers.fallback = None;
+        self.discard_pending_feedback();
+    }
+
+    fn discard_pending_feedback(&mut self) {
+        if let Some(mut feedback) = self.pending_feedback.take() {
+            feedback.discarded();
         }
     }
 
@@ -301,7 +369,8 @@ impl State {
     /// on the output.
     fn update_primary_scanout_output(&self, states: &RenderElementStates) {
         for window in &self.windows {
-            let placed = self.placements.iter().any(|(id, _)| *id == window.id);
+            let placed =
+                self.session_visible() && self.placements.iter().any(|(id, _)| *id == window.id);
             with_surfaces_surface_tree(window.toplevel.wl_surface(), |surface, data| {
                 update_surface_primary_scanout_output(
                     surface,
@@ -337,6 +406,9 @@ impl State {
     }
 
     fn send_frame_callbacks(&mut self, now: Duration, sequence: u32) {
+        if !self.session_visible() {
+            return;
+        }
         let output = &self.output;
         let should_send = |surface: &WlSurface, states: &SurfaceData| -> Option<Output> {
             // Only a surface that the last frame showed.
@@ -367,6 +439,9 @@ impl State {
     /// The fallback for surfaces that no frame shows: they get a callback
     /// about once a second, so that their clients neither stall nor spin.
     fn send_overdue_frame_callbacks(&mut self, now: Duration) {
+        if !self.session_visible() {
+            return;
+        }
         for window in &self.windows {
             send_frames_surface_tree(
                 window.toplevel.wl_surface(),

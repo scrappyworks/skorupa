@@ -181,6 +181,11 @@
           }
         );
 
+      vmCompositor = package (compositor // {
+        CARGO_PROFILE = "dev";
+        cargoBuildExtraArgs = "--bin skorupa-compositor --example skorupa-vm-client --example skorupa-lock-vm";
+      });
+
       script =
         name: tools: command:
         pkgs.runCommand "skorupa-${name}" { nativeBuildInputs = tools; } ''
@@ -208,10 +213,13 @@
 
         vm-session = import ./tests/vm/session.nix {
           inherit pkgs;
-          compositor = package (compositor // {
-            CARGO_PROFILE = "dev";
-            cargoBuildExtraArgs = "--bin skorupa-compositor --example skorupa-vm-client";
-          });
+          compositor = vmCompositor;
+        };
+
+        vm-lock-session = import ./tests/vm/session.nix {
+          inherit pkgs;
+          compositor = vmCompositor;
+          lockTest = true;
         };
 
         main = lintAndTest main;

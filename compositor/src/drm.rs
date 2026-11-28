@@ -1,12 +1,12 @@
 //! One connector on the logind seat, through Smithay's safe GBM/GLES backend.
 
 use std::error::Error;
-use std::time::Duration;
 
+use skorupa_compositor_core::lock::Content;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
-use smithay::backend::drm::compositor::{FrameFlags, PrimaryPlaneElement};
+use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements};
 use smithay::backend::drm::{
@@ -24,12 +24,13 @@ use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::LoopHandle;
-use smithay::reexports::drm::control::{Device, ModeTypeFlags, connector};
+use smithay::reexports::drm::control::{Device, ModeTypeFlags, connector, crtc};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::protocol::wl_shm::Format;
-use smithay::utils::{Clock, DeviceFd, Monotonic};
+use smithay::utils::DeviceFd;
 
+use crate::session_lock::read_lock_clocks;
 use crate::{Compositor, Config, frame, state::State};
 
 type Api = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -39,17 +40,30 @@ type Allocator = GbmAllocator<DrmDeviceFd>;
 type Exporter = GbmFramebufferExporter<DrmDeviceFd>;
 
 pub(crate) struct Drm {
-    manager: DrmOutputManager<Allocator, Exporter, (), DrmDeviceFd>,
-    surface: DrmOutput<Allocator, Exporter, (), DrmDeviceFd>,
+    manager: DrmOutputManager<Allocator, Exporter, Content, DrmDeviceFd>,
+    surface: DrmOutput<Allocator, Exporter, Content, DrmDeviceFd>,
     gpu: GpuManager<Api>,
     node: DrmNode,
     active: bool,
+    pending_flip: Option<PendingFlip>,
+}
+
+enum PendingFlip {
+    Awaited,
+    Expired,
+}
+
+pub(crate) enum DrmFlip {
+    Presented(Content),
+    Expired,
+    Ignored,
 }
 
 pub(crate) struct Devices {
     session: LibSeatSessionNotifier,
     drm: DrmDeviceNotifier,
     input: Libinput,
+    crtc: crtc::Handle,
 }
 
 fn select_connector(
@@ -57,7 +71,7 @@ fn select_connector(
 ) -> Result<
     (
         connector::Info,
-        smithay::reexports::drm::control::crtc::Handle,
+        crtc::Handle,
         smithay::reexports::drm::control::Mode,
     ),
     Box<dyn Error>,
@@ -95,10 +109,8 @@ impl Drm {
             .or_else(|| all_gpus(&seat).ok()?.into_iter().next())
             .ok_or("no DRM device on this seat")?;
         let card = DrmNode::from_path(&path)?;
-        let fd = session.open(
-            &path,
-            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
-        )?;
+        let flags = OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK;
+        let fd = session.open(&path, flags)?;
         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
         let (drm, drm_notifier) = DrmDevice::new(fd.clone(), false)?;
         if !drm.is_atomic() {
@@ -184,11 +196,13 @@ impl Drm {
             gpu,
             node,
             active: true,
+            pending_flip: None,
         };
         let devices = Devices {
             session: notifier,
             drm: drm_notifier,
             input,
+            crtc,
         };
         Ok((drm, devices, output, config))
     }
@@ -205,9 +219,12 @@ impl Drm {
         &mut self,
         windows: &[crate::state::Window],
         placements: &[frame::Placement],
+        content: Content,
+        force_full_redraw: bool,
     ) -> Result<(bool, RenderElementStates), Box<dyn Error>> {
-        if !self.active {
-            return Ok((false, RenderElementStates::default()));
+        if force_full_redraw {
+            self.surface
+                .with_compositor(DrmCompositor::reset_buffer_ages);
         }
         let mut renderer = self
             .gpu
@@ -219,7 +236,7 @@ impl Drm {
             .render_frame(
                 &mut renderer,
                 &elements,
-                frame::BACKGROUND,
+                frame::background(content),
                 FrameFlags::DEFAULT,
             )
             .map_err(|err| err.to_string())?;
@@ -230,22 +247,47 @@ impl Drm {
         }
         if !frame.is_empty {
             self.surface
-                .queue_frame(())
+                .queue_frame(content)
                 .map_err(|err| err.to_string())?;
+            self.pending_flip = Some(PendingFlip::Awaited);
         }
         Ok((!frame.is_empty, frame.states))
     }
 
-    pub(crate) fn complete(&mut self) -> bool {
-        self.active
-            && self
-                .surface
-                .frame_submitted()
-                .is_ok_and(|frame| frame.is_some())
+    pub(crate) fn ready_to_render(&self) -> bool {
+        // Permit one kernel submission at a time, including after a timeout.
+        // A late event must retire the old submission before it can be
+        // confused with the completion of a later protected frame.
+        self.active && self.pending_flip.is_none()
+    }
+
+    pub(crate) fn complete(&mut self) -> DrmFlip {
+        let Some(pending) = self.pending_flip.take() else {
+            return DrmFlip::Ignored;
+        };
+        match (pending, self.surface.frame_submitted()) {
+            (PendingFlip::Awaited, Ok(Some(content))) => DrmFlip::Presented(content),
+            (PendingFlip::Expired, Ok(Some(_))) => DrmFlip::Expired,
+            (_, Ok(None)) => {
+                tracing::warn!("DRM completion did not have a submitted frame");
+                DrmFlip::Ignored
+            }
+            (_, Err(err)) => {
+                tracing::warn!(%err, "DRM completion failed");
+                DrmFlip::Ignored
+            }
+        }
+    }
+
+    pub(crate) fn expire_flip(&mut self) {
+        if self.pending_flip.is_some() {
+            self.pending_flip = Some(PendingFlip::Expired);
+        }
     }
 
     pub(crate) fn pause(&mut self) {
         self.active = false;
+        self.expire_flip();
         self.manager.pause();
     }
 
@@ -269,16 +311,16 @@ impl Devices {
             session,
             drm,
             mut input,
+            crtc,
         } = self;
-        let clock = Clock::<Monotonic>::new();
         handle.insert_source(
             LibinputInputBackend::new(input.clone()),
             move |event, (), compositor| {
                 if let InputEvent::Keyboard { event } = event {
-                    compositor.key(
+                    compositor.key_at(
                         event.key_code().raw(),
                         event.state() == KeyState::Pressed,
-                        Duration::from(clock.now()),
+                        read_lock_clocks(),
                     );
                 }
             },
@@ -286,6 +328,7 @@ impl Devices {
 
         handle.insert_source(session, move |event, (), compositor| {
             let state: &mut State = &mut compositor.state;
+            state.lock_clock(read_lock_clocks());
             match event {
                 SessionEvent::PauseSession => {
                     input.suspend();
@@ -300,18 +343,20 @@ impl Devices {
             }
         })?;
 
-        let clock = Clock::<Monotonic>::new();
         handle.insert_source(drm, move |event, metadata, compositor| match event {
-            DrmEvent::VBlank(_) => {
+            DrmEvent::VBlank(event_crtc) if event_crtc == crtc => {
                 let time = metadata.as_ref().and_then(|metadata| match metadata.time {
                     DrmEventTime::Monotonic(time) => Some(time),
                     DrmEventTime::Realtime(_) => None,
                 });
                 let sequence = metadata.as_ref().map_or(0, |metadata| metadata.sequence);
+                let clocks = read_lock_clocks();
+                compositor.state.lock_clock(clocks);
                 compositor
                     .state
-                    .complete_drm(Duration::from(clock.now()), time, sequence);
+                    .complete_drm(clocks.monotonic, time, sequence);
             }
+            DrmEvent::VBlank(_) => {}
             DrmEvent::Error(err) => tracing::warn!(%err, "DRM event failed"),
         })?;
         Ok(())

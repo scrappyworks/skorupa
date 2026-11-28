@@ -5,6 +5,7 @@ mod client;
 
 use std::error::Error;
 use std::fs;
+use std::path::PathBuf;
 
 use client::{Client, Key};
 use wayland_client::protocol::wl_shm::Format;
@@ -12,7 +13,8 @@ use wayland_client::protocol::wl_shm::Format;
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args().skip(1);
     let digit = arguments.next().ok_or("expected a client number")?;
-    let marker = arguments.next().ok_or("expected an input marker path")?;
+    let marker = PathBuf::from(arguments.next().ok_or("expected an input marker path")?);
+    let ready = arguments.next().map(PathBuf::from);
     let (background, segments) = match digit.as_str() {
         "1" => (0xffc5_2a37, 0b011_0000),
         "2" => (0xff29_3fbc, 0b110_1101),
@@ -46,19 +48,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let buffer = client.buffer_with(width, height, Format::Xrgb8888, pixel);
     client.commit(&window, Some(&buffer));
+    if let Some(path) = ready {
+        client.roundtrip()?;
+        fs::write(path, [])?;
+    }
+
+    let pending = marker.with_extension("pending");
+    let mut keys = Vec::new();
     loop {
         client.wait()?;
-        if client.data.keys.drain(..).any(|event| {
-            matches!(
-                event,
+        let previous = keys.len();
+        for event in client.data.keys.drain(..) {
+            let key = match event {
                 Key::Press {
                     key: 30,
                     pressed: true,
                     ..
-                }
-            )
-        }) {
-            fs::write(&marker, b"a")?;
+                } => b'a',
+                Key::Press {
+                    key: 48,
+                    pressed: true,
+                    ..
+                } => b'b',
+                _ => continue,
+            };
+            if keys.len() == 16 {
+                return Err("VM input probe received too many keys".into());
+            }
+            keys.push(key);
+        }
+        if previous != keys.len() {
+            fs::write(&pending, &keys)?;
+            fs::rename(&pending, &marker)?;
         }
     }
 }

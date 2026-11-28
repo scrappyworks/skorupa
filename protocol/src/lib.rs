@@ -74,5 +74,5 @@ pub use frame::{
     decode, frame_len,
 };
 pub use verdict::{
-    Attempt, CompositorInstance, LockEpoch, Outcome, SessionId, SessionIdError, Verdict,
+    Attempt, Challenge, CompositorInstance, LockEpoch, Outcome, SessionId, SessionIdError, Verdict,
 };

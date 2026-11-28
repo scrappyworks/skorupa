@@ -7,10 +7,13 @@
 
 mod client;
 
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use client::{Client, Key, Presented, Window};
+use skorupa_compositor::core::lock::{self, Clocks, Phase};
+use skorupa_compositor::protocol::{self, Challenge, LockEpoch, Message, Outcome, Verdict};
 use skorupa_compositor::{Compositor, Config};
 use wayland_client::protocol::wl_shm::Format;
 
@@ -79,11 +82,11 @@ impl Fixture {
                 Some(at) if at <= until => self.now = self.now.max(at),
                 _ => {
                     self.now = until;
-                    self.compositor.dispatch(until).unwrap();
+                    self.compositor.dispatch_at(lock_clocks(until)).unwrap();
                     return;
                 }
             }
-            self.compositor.dispatch(self.now).unwrap();
+            self.compositor.dispatch_at(lock_clocks(self.now)).unwrap();
         }
         panic!("the compositor never ran out of deadlines before {until:?}");
     }
@@ -468,4 +471,124 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
                 .any(|event| matches!(event, Key::Press { key: 3, .. }))
         );
     }
+}
+
+fn lock_clocks(now: Duration) -> Clocks {
+    Clocks {
+        monotonic: now,
+        boottime: now,
+    }
+}
+
+#[test]
+fn req_auth_001_only_a_current_private_verdict_restores_the_session() {
+    let mut fixture = Fixture::new(config());
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut session = [0; protocol::SessionId::MAX_LEN];
+    session[..2].copy_from_slice(b"c2");
+    fixture
+        .compositor
+        .enable_session_lock(
+            lock::Config {
+                instance: lock::InstanceId([7; 16]),
+                session: lock::SessionId(session),
+                jump_threshold: Duration::from_secs(1),
+            },
+            lock_clocks(fixture.now),
+            socket,
+        )
+        .unwrap();
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, RED);
+    assert_eq!(fixture.color(), 0xff00_0000);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locked));
+    assert_eq!(fixture.compositor.pending_lock_ui(), None);
+
+    let now = lock_clocks(fixture.now);
+    let token = fixture.compositor.sleep_hold_token().unwrap();
+    fixture.compositor.end_sleep_hold(now, token);
+    let challenge = open_attempt(&mut fixture, &mut peer);
+    send_verdict(
+        &mut peer,
+        Challenge {
+            epoch: LockEpoch(challenge.epoch.0 + 1),
+            ..challenge
+        },
+    );
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locked));
+    assert_eq!(fixture.color(), 0xff00_0000);
+    fixture
+        .compositor
+        .key_at(38, true, lock_clocks(fixture.now));
+    fixture
+        .compositor
+        .key_at(38, false, lock_clocks(fixture.now));
+    fixture.sync(&mut client);
+    assert_eq!(client.data.keys, [Key::Keymap]);
+
+    send_verdict(&mut peer, challenge);
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Unlocked));
+    assert_eq!(fixture.color(), RED);
+    fixture.sync(&mut client);
+    assert_eq!(client.data.keys, [Key::Keymap, Key::Enter]);
+
+    fixture.compositor.request_lock(lock_clocks(fixture.now));
+    fixture.advance_to(fixture.now + 2 * HZ_60);
+    let current = open_attempt(&mut fixture, &mut peer);
+    assert_ne!(challenge.epoch, current.epoch);
+    let frames = client.data.frames.len();
+    let presentations = client.data.presented.len();
+    let buffer = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&window, Some(&buffer));
+    fixture.sync(&mut client);
+    send_verdict(&mut peer, challenge);
+    fixture.advance_to(fixture.now + Duration::from_secs(2));
+    client.read();
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locked));
+    assert_eq!(fixture.color(), 0xff00_0000);
+    assert_eq!(client.data.frames.len(), frames);
+    assert_eq!(client.data.presented.len(), presentations);
+
+    // A late verdict and the current verdict can both be queued before the
+    // compositor wakes. Only the latter can restore the session.
+    send_verdict(&mut peer, challenge);
+    send_verdict(&mut peer, current);
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locked));
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Unlocked));
+    assert_eq!(fixture.color(), BLUE);
+}
+
+fn open_attempt(fixture: &mut Fixture, peer: &mut UnixStream) -> Challenge {
+    let (ui, ready) = fixture.compositor.pending_lock_ui().unwrap();
+    assert!(ready <= fixture.now);
+    fixture
+        .compositor
+        .open_lock_attempt(lock_clocks(fixture.now), ui);
+    let mut frame = [0; protocol::MAX_FRAME_LEN];
+    peer.read_exact(&mut frame[..protocol::PREFIX_LEN]).unwrap();
+    let len = protocol::frame_len(frame[..protocol::PREFIX_LEN].try_into().unwrap()).unwrap();
+    peer.read_exact(&mut frame[protocol::PREFIX_LEN..len])
+        .unwrap();
+    let (Message::Challenge(challenge), _) = protocol::decode(&frame[..len]).unwrap() else {
+        panic!("expected a challenge from the compositor");
+    };
+    challenge
+}
+
+fn send_verdict(peer: &mut UnixStream, challenge: Challenge) {
+    let message = Message::Verdict(Verdict {
+        compositor_instance: challenge.compositor_instance,
+        session: challenge.session,
+        epoch: challenge.epoch,
+        attempt: challenge.attempt,
+        outcome: Outcome::Granted,
+    });
+    let mut frame = [0; protocol::MAX_FRAME_LEN];
+    let len = message.encode(&mut frame).unwrap();
+    peer.write_all(&frame[..len]).unwrap();
 }

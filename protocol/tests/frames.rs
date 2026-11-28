@@ -14,7 +14,7 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 use skorupa_protocol::{
-    Attempt, CompositorInstance, DecodeError, EncodeError, HEADER_LEN, Kind, LockEpoch,
+    Attempt, Challenge, CompositorInstance, DecodeError, EncodeError, HEADER_LEN, Kind, LockEpoch,
     MAX_FRAME_LEN, Message, Outcome, PREFIX_LEN, SessionId, SessionIdError, VERSION, Verdict,
     decode, frame_len,
 };
@@ -58,8 +58,17 @@ fn message() -> impl Strategy<Value = Message> {
         any::<u64>(),
         any::<u32>(),
         outcome,
+        any::<bool>(),
     )
-        .prop_map(|(instance, session, epoch, attempt, outcome)| {
+        .prop_map(|(instance, session, epoch, attempt, outcome, challenge)| {
+            if challenge {
+                return Message::Challenge(Challenge {
+                    compositor_instance: CompositorInstance(instance),
+                    session,
+                    epoch: LockEpoch(epoch),
+                    attempt: Attempt(attempt),
+                });
+            }
             Message::Verdict(Verdict {
                 compositor_instance: CompositorInstance(instance),
                 session,
@@ -292,7 +301,7 @@ fn req_proto_010_every_other_version_refused() {
 fn req_proto_013_invalid_fields_refused() {
     let payload = golden_payload();
 
-    for kind in (0..=u8::MAX).filter(|&kind| kind != 1) {
+    for kind in (0..=u8::MAX).filter(|&kind| !matches!(kind, 1 | 2)) {
         assert_eq!(
             decode(&frame(VERSION, kind, &payload)),
             Err(DecodeError::UnknownKind { found: kind })
@@ -397,4 +406,23 @@ fn req_proto_013_errors_describe_themselves() {
     let source = std::error::Error::source(&invalid);
     assert_eq!(source.map(ToString::to_string), Some(session.to_string()));
     assert!(std::error::Error::source(&DecodeError::UnknownKind { found: 7 }).is_none());
+}
+
+#[test]
+fn req_auth_001_challenge_has_a_distinct_wire_kind_and_binding() {
+    let mut payload = golden_payload();
+    // A challenge names the same binding as the verdict, with no outcome.
+    payload.remove(28);
+    let bytes = frame(VERSION, 2, &payload);
+    let Message::Verdict(verdict) = golden_message() else {
+        panic!("invalid verdict fixture");
+    };
+    let challenge = Message::Challenge(Challenge {
+        compositor_instance: verdict.compositor_instance,
+        session: verdict.session,
+        epoch: verdict.epoch,
+        attempt: verdict.attempt,
+    });
+    assert_eq!(decode(&bytes), Ok((challenge, bytes.len())));
+    assert_eq!(encoded(&challenge), bytes);
 }

@@ -17,6 +17,10 @@ nix build .#checks.x86_64-linux.vm-session --print-build-logs
 nix build .#checks.x86_64-linux.vm-logind --print-build-logs
 ```
 
+```sh
+nix build .#checks.x86_64-linux.vm-lock-session --print-build-logs
+```
+
 For an interactive console, build
 `checks.x86_64-linux.vm-session.driverInteractive` and run
 `result/bin/nixos-test-driver`. Use `start_all()` at its prompt to boot the
@@ -36,6 +40,12 @@ descriptor. A second inhibitor requested while preparing for sleep returns
 rejects a one-second delay. The guest's test polkit rule grants only its test
 user permission to take the delay inhibitor.
 
-The graphical guest exercises ordinary Wayland windows and keyboard input.
-The shell, PAM and the trusted lock surface are separate integration work.
-Physical output timing and kernel suspend/resume need their own tests.
+## Session lock
+
+The lock guest uses the DRM compositor with a scripted broker attached through
+an inherited socket pair. It checks the pixels on the guest output, input
+delivery to ordinary Wayland windows, and the effect of denials, stale verdicts,
+current grants and a broker disconnect. The broker and the simulated logind
+bridge notification belong to the test fixture. The trusted lock surface, PAM,
+the production session launcher and physical suspend/resume have their own
+integration work.
