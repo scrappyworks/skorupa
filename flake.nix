@@ -150,6 +150,19 @@
           }
         );
 
+      # REQ-OPS-011. Run the same proof harnesses as the local recipes, with
+      # the published verifier and its matching Rust compiler in the sandbox.
+      kani = import ./tools/nix/kani.nix { inherit pkgs; };
+      prove = args: name: craneLib.mkCargoDerivation (
+        args // {
+          pnameSuffix = "-proofs";
+          cargoArtifacts = null;
+          doInstallCargoArtifacts = false;
+          nativeBuildInputs = (args.nativeBuildInputs or []) ++ [ kani ];
+          buildPhaseCargoCommand = "cargo kani -p ${name} --lib --output-format terse";
+        }
+      );
+
       main = workspace "main" ".";
       compositorLibs = with pkgs; [
         libdrm
@@ -223,6 +236,9 @@
           lockTest = true;
         };
 
+        proof-protocol = prove main "skorupa-protocol";
+        proof-core = prove compositor "skorupa-compositor-core";
+
         main = lintAndTest main;
         compositor = lintAndTest compositor;
 
@@ -280,6 +296,7 @@
             # Tests: snapshots, coverage, mutants.
             pkgs.cargo-insta
             pkgs.cargo-llvm-cov
+            kani
             pkgs.cargo-mutants
             # Supply chain.
             pkgs.cargo-vet

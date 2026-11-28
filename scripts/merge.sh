@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Merges the current, already pushed branch into main: opens a pull request if
-# there is none, runs `just check` here on exactly that commit, and
+# there is none, runs `just check-merge` here on exactly that commit, and
 # squash-merges only a green result, so main gets one commit titled
 # "<pull request title> (#N)".
 #
@@ -69,7 +69,7 @@ git merge-base --is-ancestor origin/main HEAD ||
     fail "push $branch to origin first."
 
 # Cargo.toml files carry the lint tables and profiles of every workspace.
-gate=$(git diff --name-only origin/main "$commit" -- scripts .githooks justfile \
+gate=$(git diff --name-only origin/main "$commit" -- scripts .githooks tools/nix justfile \
     flake.nix flake.lock rust-toolchain.toml clippy.toml deny.toml budget.toml \
     ':(glob)**/Cargo.toml')
 if [ -n "$gate" ] && [ "${MERGE_GATE_CHANGE:-}" != 1 ]; then
@@ -79,8 +79,8 @@ fi
 # The check runs on a tree equal to the commit: the tree is clean before it,
 # and afterwards we verify that nothing moved. The check formats and fixes
 # nothing.
-echo "Running just check for $(git log -1 --format='%h %s' "$commit")."
-just check || fail "just check failed, not merging."
+echo "Running just check-merge for $(git log -1 --format='%h %s' "$commit")."
+just check-merge || fail "just check-merge failed, not merging."
 [ "$(git rev-parse HEAD)" = "$commit" ] || fail "HEAD moved during the check, run this again."
 clean || fail "the check changed files in the work tree, not merging: see git status."
 
@@ -113,12 +113,12 @@ title=$(timeout --kill-after=5s 30 gh pr view "$number" --json title --jq .title
 # so it says nothing about any other head of this pull request.
 timeout --kill-after=5s 30 gh api --method POST "repos/{owner}/{repo}/statuses/$commit" \
     -f state=success -f context=skorupa/check \
-    -f description="just check passed (fmt, clippy, tests, budget, req-lint, deny) on base ${base:0:12}" \
+    -f description="just check-merge passed, including Kani proofs and Quint scenarios, on base ${base:0:12}" \
     >/dev/null ||
     fail "cannot post the skorupa/check status on $commit, not merging."
 # The comment is the trace for readers: which commit, on which base.
 timeout --kill-after=5s 30 gh pr comment "$number" --body \
-    "\`just check\` passed locally for $commit on base $base." >/dev/null ||
+    "\`just check-merge\` passed locally for $commit on base $base." >/dev/null ||
     fail "cannot leave the check result on pull request #$number, not merging."
 # GitHub refuses the merge if the head is no longer $commit, and, with the
 # ruleset, if the head does not contain the current main.
@@ -139,6 +139,6 @@ fetch
 git cat-file -e "$merge_commit^{commit}" 2>/dev/null ||
     fail "$unverified: merge commit $merge_commit is not on origin."
 if [ "$(git rev-parse "$merge_commit^{tree}")" != "$(git rev-parse "$commit^{tree}")" ]; then
-    fail "pull request #$number is MERGED as $merge_commit with a tree that was NOT checked. Run just check on main now."
+    fail "pull request #$number is MERGED as $merge_commit with a tree that was NOT checked. Run just check-merge on main now."
 fi
 echo "Merged: $(git log -1 --format='%h %s' "$merge_commit"), tree as checked."
