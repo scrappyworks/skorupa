@@ -134,24 +134,28 @@ impl Fixture {
 }
 
 #[test]
+fn req_grant_004_plain_connection_only_sees_the_baseline_globals() {
+    let mut fixture = Fixture::new(config());
+    let mut globals = fixture.connect().data.globals;
+    globals.sort_unstable();
+    assert_eq!(
+        globals,
+        [
+            "wl_compositor",
+            "wl_output",
+            "wl_seat",
+            "wl_shm",
+            "wl_subcompositor",
+            "wp_presentation",
+            "xdg_wm_base",
+        ]
+    );
+}
+
+#[test]
 fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
-
-    for global in [
-        "wl_compositor",
-        "wl_shm",
-        "xdg_wm_base",
-        "wl_seat",
-        "wl_output",
-        "wp_presentation",
-    ] {
-        assert!(
-            client.data.globals.iter().any(|name| name == global),
-            "{global} is missing from {:?}",
-            client.data.globals
-        );
-    }
     assert_eq!(client.data.mode, Some((WIDTH, HEIGHT, 60_000)));
     // CLOCK_MONOTONIC: the clock the test's times stand for.
     assert_eq!(client.data.clock_id, Some(1));
