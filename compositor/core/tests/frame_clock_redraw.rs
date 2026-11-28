@@ -426,21 +426,24 @@ fn req_perf_003_timer_or_render_result_nobody_asked_for_changes_nothing() {
 }
 
 #[test]
-fn req_perf_003_flip_far_in_the_future_is_reported_and_stays_on_the_grid() {
+fn req_perf_003_impossible_future_flip_does_not_move_the_refresh_grid() {
     let mut output = Harness::new(Some(HZ_60));
     output.redraw(ms(10));
     output.rendered(ms(10), RenderOutcome::Submitted);
-    output.flip(ms(11), Some(ms(100)), 1);
-    output.send(Event::QueueRedraw);
-    assert_eq!(
-        output.send(Event::Redraw { now: ms(12) }),
-        [
-            Effect::Anomaly(Anomaly::FlipFarInFuture),
-            Effect::Render {
-                target: ms(100) + 2 * HZ_60
-            },
-        ]
-    );
+    let effects = output.flip(ms(11), Some(ms(60_011)), 1);
+    assert!(effects.contains(&Effect::Anomaly(Anomaly::FlipFarInFuture)));
+    assert!(effects.contains(&Effect::Presented {
+        time: ms(11),
+        refresh: Some(HZ_60),
+        sequence: 1,
+        hw_clock: false,
+    }));
+    output.redraw(ms(12));
+    output.rendered(ms(12), RenderOutcome::Submitted);
+    output.flip(ms(12), Some(ms(12)), 2);
+    assert_eq!(output.deadline(Timer::Throttle), Some(ms(11) + HZ_60));
+    output.fire(Timer::Throttle);
+    assert_eq!(output.timers, [None; 3]);
 }
 
 /// A client that commits on every frame callback: one flip per refresh, each
@@ -606,28 +609,49 @@ fn req_perf_013_flip_that_completes_after_the_watchdog_is_still_taken() {
     assert_eq!(output.render(ms(1013)), ms(1012) + HZ_180);
 }
 
-/// A flip can be held while the output is idle (it came unasked) and released
-/// after a new frame was submitted: the watchdog of that frame must go too.
+/// An unrequested flip received before submission cannot present the new frame.
 #[test]
-fn req_perf_013_released_flip_stops_the_watchdog_of_a_later_frame() {
+fn req_perf_015_held_flip_cannot_complete_a_later_submission() {
     let mut output = Harness::new(Some(HZ_60));
-    output.flip(ms(10), None, 0);
+    output.flip(ms(10), None, 1);
     output.render(ms(10));
     output.rendered(ms(10), RenderOutcome::Skipped);
-    assert_eq!(
-        output.flip(ms(11), None, 0),
-        [Effect::ArmTimer {
-            timer: Timer::Throttle,
-            at: ms(10) + HZ_60
-        }]
-    );
+    output.flip(ms(11), None, 2);
+    assert!(output.deadline(Timer::Throttle).is_some());
     output.redraw(ms(12));
     output.rendered(ms(12), RenderOutcome::Submitted);
-    assert!(output.deadline(Timer::FlipWatchdog).is_some());
 
-    let effects = output.fire(Timer::Throttle);
-    assert_eq!(effects[0], Effect::CancelTimer(Timer::FlipWatchdog));
-    assert_eq!(output.state(), RedrawState::Idle);
+    assert_eq!(output.deadline(Timer::Throttle), None);
+    assert_eq!(
+        output.deadline(Timer::FlipWatchdog),
+        Some(ms(12) + FLIP_TIMEOUT)
+    );
+    let effects = output.flip(ms(30), Some(ms(30)), 3);
+    assert!(effects.contains(&Effect::Presented {
+        time: ms(30),
+        refresh: Some(HZ_60),
+        sequence: 3,
+        hw_clock: true,
+    }));
+    assert_eq!(output.timers, [None; 3]);
+}
+
+#[test]
+fn req_perf_012_delayed_dispatch_consumes_the_elapsed_throttle_interval() {
+    let mut output = Harness::new(Some(ms(10)));
+    output.redraw(ms(90));
+    output.rendered(ms(90), RenderOutcome::Submitted);
+    output.flip(ms(100), Some(ms(100)), 1);
+    output.redraw(ms(100));
+    output.rendered(ms(100), RenderOutcome::Submitted);
+    let effects = output.flip(ms(120), Some(ms(101)), 2);
+
+    assert!(effects.contains(&Effect::Presented {
+        time: ms(120),
+        refresh: Some(ms(10)),
+        sequence: 2,
+        hw_clock: false,
+    }));
     assert_eq!(output.timers, [None; 3]);
 }
 
@@ -756,13 +780,11 @@ proptest! {
                     }
                 }
             };
-            prop_assert!(effects.len() <= 4, "{effects:?}");
+            prop_assert!(effects.len() <= 5, "{effects:?}");
             check_timers(&output)?;
         }
 
-        // Clients go quiet and nothing animates: every wait must end. A flip
-        // stamped up to 40 ms ahead keeps later ones held until time catches
-        // up, which takes a few rounds of the throttle timer at 180 Hz.
+        // Clients go quiet and nothing animates: every wait must end.
         for _ in 0..32 {
             if output.send(Event::Redraw { now }).is_empty() {
                 let next = TIMERS
