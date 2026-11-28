@@ -584,6 +584,9 @@ fn req_input_002_keys_reach_only_the_focused_client() {
 
     // XKB keycode 38 is the evdev key 30 that clients see.
     let time = fixture.now + Duration::from_millis(7);
+    // XKB values below the evdev offset cannot be sent as wl_keyboard keys.
+    fixture.compositor.key(7, true, time);
+    fixture.compositor.key(7, false, time);
     fixture.compositor.key(38, true, time);
     fixture.compositor.key(38, false, time);
     fixture.sync(&mut first);
