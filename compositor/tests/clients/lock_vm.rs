@@ -100,6 +100,7 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
     let mut startup_released = false;
     let mut relocked = false;
     let mut loss_tested = false;
+    let mut session_flip_tested = false;
     let mut vt_locked = false;
     let mut vt_paused = false;
     let mut disconnect_marked = false;
@@ -114,6 +115,13 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
             }
             compositor.request_lock(now);
             relocked = true;
+        }
+        if !session_flip_tested && control.join("hold-session-flip").try_exists()? {
+            for (digit, marker) in [(2, "return-to-first"), (1, "release-session-flip")] {
+                switch_without_kms(&mut compositor, digit, &control.join(marker))?;
+            }
+            session_flip_tested = true;
+            continue;
         }
         if !loss_tested && control.join("delay-kms").try_exists()? {
             lock_without_kms(&mut compositor, &mut event_loop, control)?;
@@ -155,6 +163,29 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         });
         event_loop.dispatch(Some(timeout), &mut compositor)?;
     }
+}
+
+// REQ-PERF-013: keep handling redraws and watchdog timers while the notifier
+// holds the first flip. The driver verifies the pixels before releasing it.
+fn switch_without_kms(
+    compositor: &mut Compositor,
+    digit: u32,
+    marker: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let number = 9 + digit;
+    for (key, pressed) in [(133, true), (number, true), (number, false), (133, false)] {
+        compositor.key_at(key, pressed, read_lock_clocks());
+    }
+    let end = read_lock_clocks().monotonic + Duration::from_secs(30);
+    while !marker.try_exists()? {
+        let now = read_lock_clocks().monotonic;
+        if now >= end {
+            return Err("timed out waiting for the driver to verify the workspace".into());
+        }
+        compositor.dispatch(now)?;
+        thread::sleep(CONTROL_POLL);
+    }
+    Ok(())
 }
 
 fn lock_without_kms(

@@ -33,7 +33,7 @@ def start_client(number: int) -> None:
     wait_marker(f"{name}.mapped")
 
 
-def verify_frame(name: str, covered: bool) -> None:
+def verify_frame(name: str, covered: bool, workspace: int = 1) -> None:
     observed = None
     for _ in range(16):
         machine.screenshot(name)
@@ -44,7 +44,7 @@ def verify_frame(name: str, covered: bool) -> None:
                 expected = ((0, 0), (0, 0), (0, 0))
             else:
                 observed = rgb.getpixel((image.width // 4, image.height // 2))
-                expected = (197, 42, 55)
+                expected = (197, 42, 55) if workspace == 1 else (41, 63, 188)
         if observed == expected:
             return
         machine.succeed("sleep 0.25")
@@ -90,6 +90,13 @@ with subtest("replayed verdict stays locked and a current verdict restores focus
     machine.wait_until_succeeds(f"test \"$(cat {control}/client-1.input)\" != b")
     assert machine.succeed(f"cat {control}/client-1.input") == "bb"
     machine.fail(f"test -e {control}/client-2.input")
+
+with subtest("ordinary workspaces redraw while a previous KMS completion is withheld"):
+    signal("hold-session-flip")
+    verify_frame("held-flip-on-second", covered=False, workspace=2)
+    signal("return-to-first")
+    verify_frame("held-flip-back-on-first", covered=False)
+    signal("release-session-flip")
 
 with subtest("missing KMS completion turns the output off within the lock budget"):
     signal("delay-kms")
