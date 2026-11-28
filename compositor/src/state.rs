@@ -17,7 +17,7 @@ use skorupa_compositor_core::layout::{Effect, Event, MAX_APP_ID_LEN};
 use smithay::backend::input::{InputTime, KeyState};
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::backend::renderer::{ImportMemWl, buffer_dimensions};
-use smithay::desktop::utils::OutputPresentationFeedback;
+use smithay::desktop::utils::{OutputPresentationFeedback, output_update};
 use smithay::input::keyboard::{FilterResult, KeyboardSource, XkbConfig, keysyms};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
@@ -634,6 +634,7 @@ impl XdgShellHandler for State {
             return;
         };
         let window = self.windows.remove(index);
+        output_update(&self.output, None, surface.wl_surface());
         if window.mapped {
             self.layout_event(Event::Unmap(window.id));
         }

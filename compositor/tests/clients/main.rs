@@ -213,6 +213,20 @@ fn req_api_001_one_client_tracks_its_windows_on_different_workspaces() {
 }
 
 #[test]
+fn req_api_001_destroyed_toplevel_leaves_the_output_while_its_surface_lives() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, RED);
+    assert!(client.data.on_output(&window.surface));
+    window.toplevel.destroy();
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+    client.read();
+    assert!(!client.data.on_output(&window.surface));
+    assert!(client.protocol_error().is_none());
+}
+
+#[test]
 fn req_layout_003_setting_an_unmapped_parent_keeps_the_child_independent() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
