@@ -51,6 +51,10 @@ Run from the repository root with Nix flakes enabled. A per-command opt-in
 is `nix --extra-experimental-features 'nix-command flakes' develop`. For a
 single command with flakes already enabled, use `nix develop -c quint typecheck spec/variants.qnt`.
 
+The `quint-scenarios` flake check runs the chosen v1 scenarios with a fixed seed
+and up to 32 samples per randomized test. To run that check on its own, use
+`nix build --no-link .#checks.x86_64-linux.quint-scenarios`.
+
 ```sh
 nix develop
 cd spec
