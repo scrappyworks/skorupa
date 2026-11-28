@@ -471,6 +471,11 @@ impl State {
             _ => None,
         }
     }
+    /// Whether the lock is held for sleep, including after token exhaustion.
+    #[must_use]
+    pub const fn sleep_held(&self) -> bool {
+        self.hold
+    }
 
     /// The active token, if one can still be issued without reuse.
     #[must_use]
@@ -869,6 +874,28 @@ mod proofs;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn req_lock_026_exhausted_tokens_still_hold_the_lock_for_sleep() {
+        let now = Clocks::exact(Duration::ZERO, Duration::ZERO);
+        let config = Config {
+            instance: InstanceId([1; 16]),
+            session: SessionId([2; 32]),
+            jump_threshold: Duration::from_secs(1),
+        };
+        let mut state = State::start(config, now).0;
+        let token = state.hold_token().unwrap();
+        state.hold_generation = u64::MAX;
+        let (state, _) = step(
+            state,
+            Input {
+                now,
+                event: Event::SleepOver { token },
+            },
+        );
+        assert!(state.hold_token().is_none());
+        assert!(state.sleep_held());
+    }
 
     /// REQ-LOCK-007: an epoch that cannot be followed by a new one is never
     /// left, so no epoch is used for two locks.

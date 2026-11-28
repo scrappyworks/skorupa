@@ -80,6 +80,10 @@ impl SessionLock {
         matches!(self.phase(), lock::Phase::Locking)
     }
 
+    pub(crate) const fn sleep_hold_over(&self) -> bool {
+        !self.reducer.sleep_held()
+    }
+
     pub(crate) const fn hold_token(&self) -> Option<lock::HoldToken> {
         self.reducer.hold_token()
     }
@@ -460,6 +464,31 @@ mod tests {
         );
         compositor.dispatch_at(now).unwrap();
         assert_eq!(compositor.session_phase(), Some(lock::Phase::Unlocked));
+    }
+
+    #[test]
+    fn req_lock_026_no_bridge_acknowledgement_without_an_installed_lock() {
+        let mut compositor = Compositor::new(Config::default()).unwrap();
+        let token = lock::HoldToken {
+            instance: lock::InstanceId([1; 16]),
+            generation: 0,
+        };
+        let now = Clocks::exact(BOOT, BOOT);
+        assert!(!compositor.end_sleep_hold(now, token));
+    }
+
+    #[test]
+    fn req_lock_026_a_report_for_a_retired_instance_keeps_the_new_hold() {
+        let (mut compositor, _peer) = covered();
+        let current = compositor.sleep_hold_token().unwrap();
+        let stale = lock::HoldToken {
+            instance: lock::InstanceId([42; 16]),
+            ..current
+        };
+        let now = Clocks::exact(BOOT, BOOT);
+        assert!(!compositor.end_sleep_hold(now, stale));
+        assert_eq!(compositor.sleep_hold_token(), Some(current));
+        assert!(compositor.end_sleep_hold(now, current));
     }
 
     fn verdict() -> Verdict {
