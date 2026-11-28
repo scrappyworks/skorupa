@@ -1,4 +1,4 @@
-"""REQ-LOCK-002/003/014/019 and REQ-AUTH-001/002/003/017 on the guest KMS seat."""
+"""REQ-LOCK-002/003/011/014/019 and REQ-AUTH-001/002/003/017 on the guest KMS seat."""
 
 from datetime import timedelta
 
@@ -90,6 +90,18 @@ with subtest("replayed verdict stays locked and a current verdict restores focus
     machine.wait_until_succeeds(f"test \"$(cat {control}/client-1.input)\" != b")
     assert machine.succeed(f"cat {control}/client-1.input") == "bb"
     machine.fail(f"test -e {control}/client-2.input")
+
+with subtest("missing KMS completion turns the output off within the lock budget"):
+    signal("delay-kms")
+    machine.wait_for_file(f"{control}/fallback-dark", timeout=timedelta(seconds=5))
+    assert machine.succeed("cat /sys/class/drm/card*-Virtual-*/enabled").strip() == "disabled"
+    machine.fail(f"test -e {control}/challenge-5")
+    signal("resume-kms")
+    machine.send_key("a")
+    wait_challenge(5)
+    verify_frame("fallback-woke-covered", covered=True)
+    signal("answer-5")
+    verify_frame("fallback-unlocked", covered=False)
 
 with subtest("broker disconnect restores the cover"):
     signal("close-broker")

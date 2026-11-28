@@ -310,6 +310,7 @@ impl State {
     /// A key of the seat's keyboard, sent to the focused window. `time` is on
     /// the presentation clock.
     pub(crate) fn key(&mut self, keycode: u32, pressed: bool, time: Duration) {
+        self.wake_drm();
         if !self.session_visible {
             return;
         }

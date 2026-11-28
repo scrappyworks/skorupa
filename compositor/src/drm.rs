@@ -46,11 +46,20 @@ pub(crate) struct Drm {
     node: DrmNode,
     active: bool,
     pending_flip: Option<PendingFlip>,
+    power: OutputPower,
 }
 
 enum PendingFlip {
     Awaited,
     Expired,
+    Cleared,
+}
+
+#[derive(PartialEq, Eq)]
+enum OutputPower {
+    On,
+    Off,
+    WakeRequested,
 }
 
 pub(crate) enum DrmFlip {
@@ -197,6 +206,7 @@ impl Drm {
             node,
             active: true,
             pending_flip: None,
+            power: OutputPower::On,
         };
         let devices = Devices {
             session: notifier,
@@ -256,16 +266,50 @@ impl Drm {
 
     pub(crate) fn ready_to_render(&self) -> bool {
         // Leave timed-out flips in flight so a late completion keeps its original tag.
-        self.active && self.pending_flip.is_none()
+        self.can_blank() && self.pending_flip.is_none()
+    }
+
+    pub(crate) fn can_blank(&self) -> bool {
+        self.active && self.power == OutputPower::On
+    }
+
+    pub(crate) fn blank(&mut self) -> Result<(), smithay::backend::drm::DrmError> {
+        self.surface.with_compositor(DrmCompositor::clear)?;
+        // clear retires the frame in Smithay. A queued event can still arrive
+        // on this descriptor, so reserve its slot until the notifier drains it.
+        if self.pending_flip.is_some() {
+            self.pending_flip = Some(PendingFlip::Cleared);
+        }
+        self.power = OutputPower::Off;
+        Ok(())
+    }
+
+    pub(crate) fn request_wake(&mut self) -> bool {
+        if self.power != OutputPower::On {
+            self.power = OutputPower::WakeRequested;
+        }
+        self.wake_if_ready()
+    }
+
+    pub(crate) fn wake_if_ready(&mut self) -> bool {
+        if self.active && self.power == OutputPower::WakeRequested && self.pending_flip.is_none() {
+            self.surface.reset_buffers();
+            self.power = OutputPower::On;
+            return true;
+        }
+        false
     }
 
     pub(crate) fn complete(&mut self) -> DrmFlip {
         let Some(pending) = self.pending_flip.take() else {
             return DrmFlip::Ignored;
         };
+        if matches!(pending, PendingFlip::Cleared) {
+            return DrmFlip::Expired;
+        }
         match (pending, self.surface.frame_submitted()) {
             (PendingFlip::Awaited, Ok(Some(content))) => DrmFlip::Presented(content),
-            (PendingFlip::Expired, Ok(Some(_))) => DrmFlip::Expired,
+            (PendingFlip::Expired | PendingFlip::Cleared, Ok(Some(_))) => DrmFlip::Expired,
             (_, Ok(None)) => {
                 tracing::warn!("DRM completion did not have a submitted frame");
                 DrmFlip::Ignored
@@ -278,7 +322,7 @@ impl Drm {
     }
 
     pub(crate) fn expire_flip(&mut self) {
-        if self.pending_flip.is_some() {
+        if matches!(self.pending_flip, Some(PendingFlip::Awaited)) {
             self.pending_flip = Some(PendingFlip::Expired);
         }
     }
@@ -296,6 +340,7 @@ impl Drm {
             .map_err(|err| err.to_string())?;
         self.surface.reset_buffers();
         self.active = true;
+        self.power = OutputPower::On;
         Ok(())
     }
 }

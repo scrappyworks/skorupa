@@ -93,15 +93,43 @@ const FRAME_CALLBACK_THROTTLE: Duration = Duration::from_millis(995);
 /// How long after a round of frame callbacks the surfaces that are still
 /// waiting for one are looked at again.
 const FRAME_CALLBACK_FALLBACK: Duration = Duration::from_secs(1);
+const COVER_TIMEOUT: Duration = Duration::from_millis(500);
+const COVER_RETRY: Duration = Duration::from_millis(100);
+const COVER_BLANK_ATTEMPTS: u8 = 3;
 
-/// One deadline per timer of the output: the three of the frame pacer and
-/// the frame-callback fallback.
+#[derive(Debug, Default)]
+struct CoverTimer {
+    deadline: Option<Duration>,
+    attempts: u8,
+}
+
+impl CoverTimer {
+    fn blank_due(&mut self, now: Duration, waiting_for_cover: bool) -> bool {
+        if !waiting_for_cover {
+            *self = Self::default();
+            return false;
+        }
+        if self.attempts == 0 && self.deadline.is_none() {
+            self.deadline = Some(now.saturating_add(COVER_TIMEOUT));
+        }
+        if self.deadline.is_none_or(|at| now < at) {
+            return false;
+        }
+        self.attempts += 1;
+        self.deadline =
+            (self.attempts < COVER_BLANK_ATTEMPTS).then_some(now.saturating_add(COVER_RETRY));
+        true
+    }
+}
+
+/// Output deadlines for frame pacing, client callbacks and lock fallback.
 #[derive(Debug, Default)]
 pub(crate) struct Timers {
     estimated_vblank: Option<Duration>,
     throttle: Option<Duration>,
     flip_watchdog: Option<Duration>,
     fallback: Option<Duration>,
+    cover: CoverTimer,
 }
 
 const PACER_TIMERS: [Timer; 3] = [Timer::EstimatedVBlank, Timer::Throttle, Timer::FlipWatchdog];
@@ -121,6 +149,7 @@ impl Timers {
             self.throttle,
             self.flip_watchdog,
             self.fallback,
+            self.cover.deadline,
         ]
         .into_iter()
         .flatten()
@@ -161,6 +190,7 @@ impl State {
     /// The timers that are due, then the event-loop tail. At most one frame
     /// is rendered per call.
     pub(crate) fn tick(&mut self, now: Duration) {
+        self.blank_uncovered_output(now);
         // Each kind at most once: a timer armed while these run is due
         // later than `now`, and if not, the next call takes it.
         for _ in PACER_TIMERS {
@@ -174,6 +204,28 @@ impl State {
             self.send_overdue_frame_callbacks(now);
         }
         self.pace(now, Event::Redraw { now });
+    }
+
+    fn blank_uncovered_output(&mut self, now: Duration) {
+        let Backend::Drm(backend) = &mut self.backend else {
+            return;
+        };
+        let waiting_for_cover = backend.can_blank()
+            && self
+                .session_lock
+                .as_ref()
+                .is_some_and(crate::session_lock::SessionLock::needs_cover_frame);
+        // REQ-LOCK-011: the frame watchdog may be waiting for an older frame.
+        // Bound the cover wait independently of page-flip and render retries.
+        if self.timers.cover.blank_due(now, waiting_for_cover) {
+            match backend.blank() {
+                Ok(()) => {
+                    self.reset_frame_clock();
+                    self.lock_event(LockEvent::OutputOff);
+                }
+                Err(err) => warn!(%err, "could not blank the uncovered DRM output"),
+            }
+        }
     }
 
     /// Feeds one event to the pacer and carries out what it asks for.
@@ -322,8 +374,17 @@ impl State {
                     },
                 );
             }
-            DrmFlip::Expired if backend.ready_to_render() => self.queue_redraw(),
-            DrmFlip::Expired | DrmFlip::Ignored => {}
+            DrmFlip::Expired => {
+                let woke = backend.wake_if_ready();
+                let ready = backend.ready_to_render();
+                if woke {
+                    self.lock_event(LockEvent::OutputOn);
+                }
+                if ready {
+                    self.queue_redraw();
+                }
+            }
+            DrmFlip::Ignored => {}
         }
     }
 
@@ -333,12 +394,24 @@ impl State {
             // Losing the seat invalidates a pending flip as lock evidence.
             // The kernel has not confirmed the output is off.
             self.lock_event(LockEvent::FlipFailed);
-            self.pacer = skorupa_compositor_core::frame_clock::FramePacer::new(
-                self.config.refresh_interval(),
-                self.config.flip_timeout,
-            );
-            self.timers = Timers::default();
-            self.discard_pending_feedback();
+            self.reset_frame_clock();
+        }
+    }
+
+    fn reset_frame_clock(&mut self) {
+        self.pacer = skorupa_compositor_core::frame_clock::FramePacer::new(
+            self.config.refresh_interval(),
+            self.config.flip_timeout,
+        );
+        self.timers = Timers::default();
+        self.discard_pending_feedback();
+    }
+
+    pub(crate) fn wake_drm(&mut self) {
+        if let Backend::Drm(backend) = &mut self.backend
+            && backend.request_wake()
+        {
+            self.lock_event(LockEvent::OutputOn);
         }
     }
 

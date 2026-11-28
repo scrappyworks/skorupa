@@ -45,7 +45,12 @@ user permission to take the delay inhibitor.
 The lock guest uses the DRM compositor with a scripted broker attached through
 an inherited socket pair. It checks the pixels on the guest output, input
 delivery to ordinary Wayland windows, and the effect of denials, stale verdicts,
-current grants and a broker disconnect. The broker and the simulated logind
-bridge notification belong to the test fixture. The trusted lock surface, PAM,
-the production session launcher and physical suspend/resume have their own
-integration work.
+current grants and a broker disconnect. A fault probe withholds the KMS event,
+checks that the guest connector is disabled, then releases the delayed event
+and sends a key. Authentication resumes after a new cover reaches the output.
+A completion that never arrives keeps the output dark until the DRM session
+is recreated.
+
+The broker and simulated logind bridge notification belong to the test fixture.
+The trusted lock surface, PAM, the production session launcher and physical
+suspend/resume have their own integration work.

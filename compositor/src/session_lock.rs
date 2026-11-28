@@ -25,10 +25,11 @@ impl NonNegativeClockSource for BootTime {}
 /// Samples the clocks whose difference lets the reducer detect time spent asleep.
 #[must_use]
 pub fn read_lock_clocks() -> Clocks {
-    Clocks {
-        monotonic: Clock::<Monotonic>::new().now().into(),
-        boottime: Clock::<BootTime>::new().now().into(),
-    }
+    let clock = Clock::<BootTime>::new();
+    let before = clock.now();
+    let monotonic = Clock::<Monotonic>::new().now();
+    // Include a resume that occurs after reading the monotonic clock.
+    Clocks::bracketed(before.into(), monotonic.into(), clock.now().into())
 }
 
 pub(crate) struct SessionLock {

@@ -56,7 +56,8 @@ impl Compositor {
     /// Fences ordinary input, schedules the cover, and attaches the authd endpoint.
     ///
     /// The launcher must give the peer exclusively to authd. The lock reaches
-    /// [`lock::Phase::Locked`] after the backend presents the cover.
+    /// [`lock::Phase::Locked`] after the backend presents the cover or confirms
+    /// that the output is off.
     ///
     /// # Errors
     /// Returns `AlreadyExists` for a second installation. An invalid session

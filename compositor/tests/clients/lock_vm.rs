@@ -98,6 +98,7 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
     let mut startup_marked = false;
     let mut startup_released = false;
     let mut relocked = false;
+    let mut loss_tested = false;
     let mut disconnect_marked = false;
     loop {
         let now = read_lock_clocks();
@@ -112,6 +113,11 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
             }
             compositor.request_lock(now);
             relocked = true;
+        }
+        if !loss_tested && control.join("delay-kms").try_exists()? {
+            lock_without_kms(&mut compositor, control)?;
+            loss_tested = true;
+            continue;
         }
         if let Some((ui, ready)) = compositor.pending_lock_ui()
             && now.monotonic >= ready
@@ -139,12 +145,32 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn lock_without_kms(compositor: &mut Compositor, control: &Path) -> Result<(), Box<dyn Error>> {
+    let now = read_lock_clocks();
+    compositor.request_lock(now);
+    // Stop reading KMS events while the compositor still services its timers.
+    let end = now.monotonic + Duration::from_millis(850);
+    loop {
+        let now = read_lock_clocks();
+        compositor.dispatch_at(now)?;
+        if now.monotonic >= end {
+            break;
+        }
+        thread::sleep(CONTROL_POLL);
+    }
+    if compositor.session_phase() != Some(Phase::Locked) || compositor.pending_lock_ui().is_some() {
+        return Err("lock did not reach the dark fallback with KMS completion withheld".into());
+    }
+    fs::write(control.join("fallback-dark"), [])?;
+    Ok(wait_for_marker(&control.join("resume-kms"))?)
+}
+
 fn run_broker(control: &Path) -> Result<(), Box<dyn Error>> {
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
     let mut previous_grant = None;
 
-    for number in 1..=4 {
+    for number in 1..=5 {
         let challenge = read_challenge(&mut input)?;
         fs::write(control.join(format!("challenge-{number}")), [])?;
         wait_for_marker(&control.join(format!("answer-{number}")))?;

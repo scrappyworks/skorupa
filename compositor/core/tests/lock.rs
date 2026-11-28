@@ -26,10 +26,7 @@ const CONFIG: Config = Config {
     session: SessionId([b'c'; 32]),
     jump_threshold: Duration::from_secs(1),
 };
-const BOOT: Clocks = Clocks {
-    monotonic: Duration::from_secs(100),
-    boottime: Duration::from_secs(100),
-};
+const BOOT: Clocks = Clocks::exact(Duration::from_secs(100), Duration::from_secs(100));
 /// What the first attempt of the first lock is bound to.
 const FIRST: Binding = Binding {
     instance: CONFIG.instance,
@@ -1066,6 +1063,54 @@ fn req_auth_001_generated_sequences_reach_the_interesting_states() {
         "{second_epochs} of 256 reached a second lock"
     );
     assert!(releases > 64, "{releases} of 256 released a sleep");
+}
+
+#[test]
+fn req_lock_026_descheduled_clock_read_retains_hold() {
+    let mut rig = Rig::start();
+    assert!(acknowledged(&rig.present(Content::Protected)));
+    let token = rig.state.hold_token().unwrap();
+    let before = rig.now.monotonic;
+    let after = before + 2 * CONFIG.jump_threshold;
+    let (state, effects) = step(
+        rig.state,
+        Input {
+            now: Clocks::bracketed(before, before, after),
+            event: Event::SleepOver { token },
+        },
+    );
+    assert_eq!(state.hold_token(), Some(token));
+    assert_eq!(state.phase(), Phase::Locking);
+    assert_eq!(restart_delay(&effects), None);
+
+    let (state, _) = step(
+        state,
+        Input {
+            now: Clocks::bracketed(after + NAP, after, after + NAP + TICK),
+            event: Event::Tick,
+        },
+    );
+    assert_eq!(state.hold_token(), None);
+}
+
+#[test]
+fn req_lock_025_ambiguous_clock_read_voids_the_open_verdict() {
+    let mut rig = Rig::locked();
+    let binding = rig.open_attempt();
+    let monotonic = rig.now.monotonic;
+    let (state, effects) = step(
+        rig.state,
+        Input {
+            // A resume after the monotonic read makes the sample ambiguous.
+            now: Clocks::bracketed(monotonic, monotonic, monotonic + NAP),
+            event: Event::Verdict {
+                binding,
+                outcome: Outcome::Granted,
+            },
+        },
+    );
+    assert_eq!(state.phase(), Phase::Locking);
+    assert!(effects.contains(&Effect::StopUi { ui: rig.ui }));
 }
 
 #[test]

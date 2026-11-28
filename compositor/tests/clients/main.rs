@@ -474,10 +474,7 @@ fn req_layout_006_workspace_selection_changes_the_visible_client_and_focus() {
 }
 
 fn lock_clocks(now: Duration) -> Clocks {
-    Clocks {
-        monotonic: now,
-        boottime: now,
-    }
+    Clocks::exact(now, now)
 }
 
 #[test]
