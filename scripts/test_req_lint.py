@@ -21,6 +21,19 @@ class RequirementCatalogTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("docs/requirements.md", result.stderr)
 
+    def test_req_ops_007_kani_proofs_name_a_requirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docs").mkdir()
+            (root / "docs/requirements.md").write_text("| REQ-OPS-011 | Bounded proofs |\n")
+            harness = root / "sample.rs"
+            harness.write_text("#[kani::proof]\n#[kani::unwind(2)]\nfn unchecked() {}\n")
+            result = self.run_gate(root)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("unchecked", result.stderr)
+            harness.write_text("#[kani::proof]\nfn req_ops_011_proof() {}\n")
+            self.assertEqual(self.run_gate(root).returncode, 0)
+
     def test_req_ops_007_only_definitions_count(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
