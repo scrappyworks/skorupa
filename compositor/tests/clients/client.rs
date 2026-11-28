@@ -2,6 +2,7 @@
 //! the fixture moves bytes by calling `flush` and `read` in turn with the
 //! compositor.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -19,6 +20,8 @@ use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_shm::{Format, WlShm};
 use wayland_client::protocol::wl_shm_pool::WlShmPool;
+use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
+use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::wp::presentation_time::client::wp_presentation::{self, WpPresentation};
@@ -67,6 +70,7 @@ pub enum CallbackKind {
 pub struct Data {
     pub globals: Vec<String>,
     compositor: Option<WlCompositor>,
+    subcompositor: Option<WlSubcompositor>,
     shm: Option<WlShm>,
     wm_base: Option<XdgWmBase>,
     presentation: Option<WpPresentation>,
@@ -80,9 +84,16 @@ pub struct Data {
     pub presented: Vec<Presented>,
     pub discarded: u32,
     pub keys: Vec<Key>,
-    /// Whether the surface is on the output, by the last enter or leave.
-    pub on_output: bool,
+    /// Surfaces that received an enter without a subsequent leave.
+    surfaces_on_output: HashSet<WlSurface>,
     syncs: u32,
+}
+
+impl Data {
+    #[allow(dead_code)] // Read by the headless integration tests.
+    pub fn on_output(&self, surface: &WlSurface) -> bool {
+        self.surfaces_on_output.contains(surface)
+    }
 }
 
 pub struct Window {
@@ -193,6 +204,23 @@ impl Client {
         }
     }
 
+    #[allow(dead_code)] // Used by headless subsurface tests.
+    pub fn create_subsurface(&self, parent: &WlSurface) -> (WlSurface, WlSubsurface) {
+        let child = self
+            .data
+            .compositor
+            .as_ref()
+            .unwrap()
+            .create_surface(&self.qh, ());
+        let role =
+            self.data
+                .subcompositor
+                .as_ref()
+                .unwrap()
+                .get_subsurface(&child, parent, &self.qh, ());
+        (child, role)
+    }
+
     /// A shared-memory buffer filled with one color. `format` says whether
     /// the top byte of `pixel` is alpha or padding.
     pub fn buffer(&mut self, width: i32, height: i32, format: Format, pixel: u32) -> WlBuffer {
@@ -255,6 +283,7 @@ impl Dispatch<WlRegistry, ()> for Data {
         };
         match interface.as_str() {
             "wl_compositor" => state.compositor = Some(registry.bind(name, version, qh, ())),
+            "wl_subcompositor" => state.subcompositor = Some(registry.bind(name, version, qh, ())),
             "wl_shm" => state.shm = Some(registry.bind(name, version, qh, ())),
             "xdg_wm_base" => state.wm_base = Some(registry.bind(name, version, qh, ())),
             "wp_presentation" => state.presentation = Some(registry.bind(name, version, qh, ())),
@@ -313,7 +342,7 @@ impl Dispatch<WlOutput, ()> for Data {
 impl Dispatch<WlSurface, ()> for Data {
     fn event(
         state: &mut Self,
-        _: &WlSurface,
+        surface: &WlSurface,
         event: wayland_client::protocol::wl_surface::Event,
         (): &(),
         _: &Connection,
@@ -321,8 +350,12 @@ impl Dispatch<WlSurface, ()> for Data {
     ) {
         use wayland_client::protocol::wl_surface::Event;
         match event {
-            Event::Enter { .. } => state.on_output = true,
-            Event::Leave { .. } => state.on_output = false,
+            Event::Enter { .. } => {
+                state.surfaces_on_output.insert(surface.clone());
+            }
+            Event::Leave { .. } => {
+                state.surfaces_on_output.remove(surface);
+            }
             _ => {}
         }
     }
@@ -484,6 +517,8 @@ impl Dispatch<WlKeyboard, ()> for Data {
 }
 
 delegate_noop!(Data: WlCompositor);
+delegate_noop!(Data: WlSubcompositor);
+delegate_noop!(Data: WlSubsurface);
 delegate_noop!(Data: WlShmPool);
 delegate_noop!(Data: ignore WlShm);
 delegate_noop!(Data: ignore WlBuffer);
