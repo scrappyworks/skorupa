@@ -347,7 +347,7 @@ impl Drm {
             .gpu
             .single_renderer(&self.node)
             .map_err(|err| err.to_string())?;
-        let elements = frame::elements(&mut renderer, windows, placements);
+        let elements = frame::elements(&mut renderer, output, windows, placements);
         let frame = self
             .surface
             .render_frame(

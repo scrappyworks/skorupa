@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use smithay::backend::renderer::sync::{Fence, Interrupted};
 
 use super::*;
+use crate::test_support::{connect, exchange};
 
 #[derive(Debug)]
 struct TestFence(Arc<AtomicBool>);
@@ -165,26 +166,16 @@ fn req_lock_011_prepared_cover_polls_its_fence_without_waiting() {
     assert!(frame.ready());
 }
 
-// Share the in-process Wayland client with the headless integration tests.
-#[allow(dead_code)]
-#[path = "../../tests/clients/client.rs"]
-mod client;
-
-fn exchange(compositor: &mut Compositor, client: &mut client::Client) {
-    client.flush();
-    compositor
-        .display
-        .dispatch_clients(&mut compositor.state)
-        .unwrap();
-    compositor.display.flush_clients().unwrap();
-    client.read();
-}
-
 fn render_session(state: &mut State) -> frame::RenderedFrame {
     let crate::state::Backend::Headless(backend) = &mut state.backend else {
         unreachable!()
     };
-    let elements = frame::elements(backend.renderer(), &state.windows, &state.placements);
+    let elements = frame::elements(
+        backend.renderer(),
+        &state.output,
+        &state.windows,
+        &state.placements,
+    );
     let (damaged, states) = backend.render(&elements).unwrap();
     frame::RenderedFrame::new(
         &state.output,
@@ -196,11 +187,42 @@ fn render_session(state: &mut State) -> frame::RenderedFrame {
 }
 
 #[test]
+fn req_api_001_output_membership_follows_the_prepared_frame_across_a_fence() {
+    use wayland_client::protocol::wl_shm;
+
+    let mut compositor = Compositor::new(Config {
+        output_size: (4, 4),
+        ..Config::default()
+    })
+    .unwrap();
+    let mut client = connect(&mut compositor);
+    let window = client.create_window();
+    exchange(&mut compositor, &mut client);
+    let buffer = client.buffer(4, 4, wl_shm::Format::Xrgb8888, 0xffff_0000);
+    client.commit(&window, Some(&buffer));
+    exchange(&mut compositor, &mut client);
+
+    let prepared = render_session(&mut compositor.state);
+    window.surface.attach(None, 0, 0);
+    window.surface.commit();
+    exchange(&mut compositor, &mut client);
+    compositor
+        .state
+        .update_primary_scanout_output(&prepared.states);
+    exchange(&mut compositor, &mut client);
+    assert!(client.data.on_output(&window.surface));
+
+    let next = render_session(&mut compositor.state);
+    compositor.state.update_primary_scanout_output(&next.states);
+    exchange(&mut compositor, &mut client);
+    assert!(!client.data.on_output(&window.surface));
+}
+
+#[test]
 fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
     use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
     use smithay::utils::Monotonic;
     use smithay::wayland::presentation::Refresh;
-    use std::os::unix::net::UnixStream;
     use std::time::Duration;
     use wayland_client::protocol::wl_shm;
 
@@ -209,12 +231,7 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
         ..Config::default()
     })
     .unwrap();
-    let (server, stream) = UnixStream::pair().unwrap();
-    compositor.add_client(server).unwrap();
-    let mut client = client::Client::new(stream);
-    for _ in 0..3 {
-        exchange(&mut compositor, &mut client);
-    }
+    let mut client = connect(&mut compositor);
     let window = client.create_window();
     exchange(&mut compositor, &mut client);
     let first = client.buffer(4, 4, wl_shm::Format::Xrgb8888, 0xffff_0000);
