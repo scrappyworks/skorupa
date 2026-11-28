@@ -208,6 +208,27 @@ fn req_api_001_one_client_tracks_its_windows_on_different_workspaces() {
 }
 
 #[test]
+fn req_api_001_scale_change_rejects_nonintegral_retained_buffer_dimensions() {
+    use wayland_client::protocol::wl_surface;
+
+    let mut fixture = Fixture::new(config());
+    for (width, height) in [(3, 4), (4, 3)] {
+        let mut client = fixture.connect();
+        let root = client.create_window();
+        fixture.sync(&mut client);
+        let buffer = client.buffer(width, height, Format::Xrgb8888, RED);
+        client.commit(&root, Some(&buffer));
+        fixture.sync(&mut client);
+        root.surface.set_buffer_scale(2);
+        root.surface.commit();
+        fixture.exchange(&mut client);
+        let error = client.protocol_error().unwrap();
+        assert_eq!(error.object_interface, "wl_surface");
+        assert_eq!(error.code, wl_surface::Error::InvalidSize as u32);
+    }
+}
+
+#[test]
 fn req_api_001_scale_only_commit_resizes_the_attached_buffer() {
     let mut fixture = Fixture::new(config());
     let background = fixture.color();

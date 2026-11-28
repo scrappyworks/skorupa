@@ -400,30 +400,33 @@ impl State {
         self.arrange();
     }
 
+    fn buffer_size_error(&self, buffer: &WlBuffer, scale: i32) -> Option<String> {
+        let (max_w, max_h) = self.config.max_buffer_size;
+        let size = buffer_dimensions(buffer)?;
+        if size.w > max_w || size.h > max_h {
+            Some(format!(
+                "buffer of {}x{} is larger than the limit of {max_w}x{max_h}",
+                size.w, size.h
+            ))
+        } else if size.w % scale != 0 || size.h % scale != 0 {
+            Some(format!(
+                "buffer of {}x{} is not divisible by scale {scale}",
+                size.w, size.h
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Checks the pending attachment before the renderer can consume it.
     fn check_buffer_size(&self, surface: &WlSurface) {
-        let (max_w, max_h) = self.config.max_buffer_size;
         let error = with_states(surface, |states| {
             let mut attributes = states.cached_state.get::<SurfaceAttributes>();
             let pending = attributes.pending();
             let Some(BufferAssignment::NewBuffer(buffer)) = &pending.buffer else {
                 return None;
             };
-            let size = buffer_dimensions(buffer)?;
-            let scale = pending.buffer_scale;
-            let reason = if size.w > max_w || size.h > max_h {
-                format!(
-                    "buffer of {}x{} is larger than the limit of {max_w}x{max_h}",
-                    size.w, size.h
-                )
-            } else if size.w % scale != 0 || size.h % scale != 0 {
-                format!(
-                    "buffer of {}x{} is not divisible by scale {scale}",
-                    size.w, size.h
-                )
-            } else {
-                return None;
-            };
+            let reason = self.buffer_size_error(buffer, pending.buffer_scale)?;
             pending.buffer = None;
             Some(reason)
         });
@@ -431,30 +434,37 @@ impl State {
             surface.post_error(wl_surface::Error::InvalidSize, reason);
         }
     }
-}
 
-/// Smithay reads a change in buffer scale or transform only with a buffer
-/// assignment. Reuse its retained buffer after the transaction applies; an
-/// actual replacement or removal in the same commit always wins.
-fn apply_buffer_mapping(surface: &WlSurface) {
-    with_states(surface, |states| {
-        let Some(renderer) = states.data_map.get::<RendererSurfaceStateUserData>() else {
-            return;
-        };
-        let Ok(renderer) = renderer.lock() else {
-            return;
-        };
-        let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-        let current = attributes.current();
-        if current.buffer.is_none()
-            && (current.buffer_scale != renderer.buffer_scale()
-                || smithay::utils::Transform::from(current.buffer_transform)
-                    != renderer.buffer_transform())
-            && let Some(buffer) = renderer.buffer()
-        {
-            current.buffer = Some(BufferAssignment::NewBuffer((**buffer).clone()));
+    /// Smithay reads a change in buffer scale or transform only with a buffer
+    /// assignment. Reuse its retained buffer after the transaction applies; an
+    /// actual replacement or removal in the same commit always wins.
+    fn apply_buffer_mapping(&self, surface: &WlSurface) {
+        let error = with_states(surface, |states| {
+            let renderer = states
+                .data_map
+                .get::<RendererSurfaceStateUserData>()?
+                .lock()
+                .ok()?;
+            let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+            let current = attributes.current();
+            if current.buffer.is_some()
+                || (current.buffer_scale == renderer.buffer_scale()
+                    && smithay::utils::Transform::from(current.buffer_transform)
+                        == renderer.buffer_transform())
+            {
+                return None;
+            }
+            let buffer = renderer.buffer()?;
+            let error = self.buffer_size_error(buffer, current.buffer_scale);
+            if error.is_none() {
+                current.buffer = Some(BufferAssignment::NewBuffer((**buffer).clone()));
+            }
+            error
+        });
+        if let Some(reason) = error {
+            surface.post_error(wl_surface::Error::InvalidSize, reason);
         }
-    });
+    }
 }
 
 impl CompositorHandler for State {
@@ -479,7 +489,7 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
-        apply_buffer_mapping(surface);
+        self.apply_buffer_mapping(surface);
         on_commit_buffer_handler::<Self>(surface);
         if let Some(index) = self
             .windows
