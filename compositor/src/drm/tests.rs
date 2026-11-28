@@ -98,6 +98,24 @@ fn req_perf_013_failed_synchronous_commit_keeps_the_original_event_pending() {
 }
 
 #[test]
+fn req_perf_003_failed_submission_retries_only_a_queued_redraw() {
+    for queued in [false, true] {
+        let mut frames = DrmFrames {
+            prepared: Some(prepared(Content::Session)),
+            ..DrmFrames::default()
+        };
+        if queued {
+            frames.queue_redraw();
+        }
+        let Err(failure) = frames.submit(|_, _| Err("commit failed".into())) else {
+            panic!("submission unexpectedly succeeded");
+        };
+        assert_eq!(failure.redraw_needed, queued);
+        assert!(frames.prepared.is_none());
+    }
+}
+
+#[test]
 fn req_perf_003_redraws_during_a_fence_wait_preserve_the_frame_until_submission() {
     let signaled = Arc::new(AtomicBool::new(false));
     let mut frames = DrmFrames {

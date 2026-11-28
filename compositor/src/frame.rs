@@ -10,6 +10,7 @@
 // Changes are listed in docs/niri-ports.md.
 
 use std::cell::Cell;
+use std::error::Error;
 use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::{Effect, Event, RedrawState, RenderOutcome, Timer};
@@ -97,6 +98,21 @@ where
         ));
     }
     elements
+}
+
+#[derive(Debug)]
+pub(crate) struct RenderFailure {
+    pub(crate) cause: Box<dyn Error>,
+    pub(crate) redraw_needed: bool,
+}
+
+impl From<Box<dyn Error>> for RenderFailure {
+    fn from(cause: Box<dyn Error>) -> Self {
+        Self {
+            cause,
+            redraw_needed: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -472,6 +488,7 @@ impl State {
                     .map(|(damaged, states)| {
                         RenderedFrame::new(&self.output, &self.windows, content, damaged, states)
                     })
+                    .map_err(RenderFailure::from)
             }
             Backend::Drm(backend) => backend.submit(),
         };
@@ -487,9 +504,9 @@ impl State {
                     (RenderOutcome::NoDamage, false)
                 }
             }
-            Err(err) => {
-                warn!(%err, "rendering the frame failed");
-                (RenderOutcome::Failed, false)
+            Err(failure) => {
+                warn!(err = %failure.cause, "rendering the frame failed");
+                (RenderOutcome::Failed, failure.redraw_needed)
             }
         }
     }

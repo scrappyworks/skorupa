@@ -93,13 +93,22 @@ impl DrmFrames {
     fn submit(
         &mut self,
         submit: impl FnOnce(Submission, Content) -> Result<(), Box<dyn Error>>,
-    ) -> Result<frame::RenderedFrame, Box<dyn Error>> {
-        let frame = self.prepared.take().ok_or("no prepared DRM frame")?;
+    ) -> Result<frame::RenderedFrame, frame::RenderFailure> {
+        let frame = self
+            .prepared
+            .take()
+            .ok_or_else(|| Box::<dyn Error>::from("no prepared DRM frame"))?;
         if frame.rendered.damaged {
+            // A newer commit already requested a separate frame. Keep that
+            // request even when submission of this older frame fails.
+            let failure = |cause| frame::RenderFailure {
+                cause,
+                redraw_needed: frame.rendered.redraw_needed,
+            };
             let mode = self
                 .submission(frame.content)
-                .ok_or("waiting for DRM flip")?;
-            submit(mode, frame.content)?;
+                .ok_or_else(|| failure("waiting for DRM flip".into()))?;
+            submit(mode, frame.content).map_err(failure)?;
             self.pending_flip = Some(match mode {
                 Submission::Queue => PendingFlip::Awaited,
                 // Smithay replaced its pending frame. Its old kernel event can still arrive.
@@ -381,7 +390,7 @@ impl Drm {
         self.frames.queue_redraw();
     }
 
-    pub(crate) fn submit(&mut self) -> Result<frame::RenderedFrame, Box<dyn Error>> {
+    pub(crate) fn submit(&mut self) -> Result<frame::RenderedFrame, frame::RenderFailure> {
         self.frames.submit(|mode, content| {
             match mode {
                 Submission::Queue => self.surface.queue_frame(content),
