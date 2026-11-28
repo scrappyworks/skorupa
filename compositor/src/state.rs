@@ -232,20 +232,36 @@ impl State {
         self.config.output_size.into()
     }
 
+    /// An xdg-toplevel can only be the parent of another while mapped.
+    fn mapped_parent(&self, surface: &ToplevelSurface) -> Option<WindowId> {
+        let parent = surface.parent()?;
+        self.windows
+            .iter()
+            .find(|window| window.mapped && *window.toplevel.wl_surface() == parent)
+            .map(|window| window.id)
+    }
+
+    fn initial_size(&self, surface: &ToplevelSurface) -> Option<Size<i32, Logical>> {
+        self.mapped_parent(surface)
+            .is_none()
+            .then(|| self.output_size())
+    }
+
     /// Applies what the layout says: sizes and states to the clients, the
     /// keyboard to the focused window.
     fn arrange(&mut self) {
         self.placements = self.layout.placements();
         let focus = self.layout.focus();
 
-        let output_size = self.output_size();
-        for window in &mut self.windows {
+        for index in 0..self.windows.len() {
+            let window = &self.windows[index];
             let configured = self.layout.configure(window.id);
-            window.dialog = configured.is_some_and(|configured| configured.size.is_none());
             let size = configured.map_or_else(
-                || window.toplevel.parent().is_none().then_some(output_size),
+                || self.initial_size(&window.toplevel),
                 |configured| configured.size.map(|size| (size.w, size.h).into()),
             );
+            let window = &mut self.windows[index];
+            window.dialog = configured.is_some_and(|configured| configured.size.is_none());
             window.set_size(size);
             window.toplevel.with_pending_state(|state| {
                 if configured.is_some_and(|configured| configured.fullscreen) {
@@ -399,7 +415,6 @@ impl CompositorHandler for State {
             .iter()
             .position(|window| window.toplevel.wl_surface() == surface)
         {
-            let output_size = self.output_size();
             let window = &mut self.windows[index];
             let mapped = with_renderer_surface_state(surface, |state| state.buffer().is_some())
                 .unwrap_or(false);
@@ -407,12 +422,7 @@ impl CompositorHandler for State {
                 window.mapped = mapped;
                 let id = window.id;
                 let event = if mapped {
-                    let parent = window.toplevel.parent().and_then(|parent| {
-                        self.windows
-                            .iter()
-                            .find(|window| window.mapped && *window.toplevel.wl_surface() == parent)
-                            .map(|window| window.id)
-                    });
+                    let parent = self.mapped_parent(&self.windows[index].toplevel);
                     let app_id = with_states(surface, |states| {
                         let role = states
                             .data_map
@@ -438,8 +448,9 @@ impl CompositorHandler for State {
                 self.layout_event(event);
                 return;
             }
+            let window = &self.windows[index];
             if !window.toplevel.is_initial_configure_sent() {
-                window.set_size(window.toplevel.parent().is_none().then_some(output_size));
+                window.set_size(self.initial_size(&window.toplevel));
                 window.toplevel.send_configure();
             }
         }
@@ -471,6 +482,20 @@ impl XdgShellHandler for State {
             mapped: false,
             dialog: false,
         });
+    }
+
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        // set_parent takes effect immediately. A currently unmapped parent
+        // means null, even if it maps before the child's first buffer.
+        if surface.parent().is_some() && self.mapped_parent(&surface).is_none() {
+            with_states(surface.wl_surface(), |states| {
+                if let Some(data) = states.data_map.get::<XdgToplevelSurfaceData>()
+                    && let Ok(mut role) = data.lock()
+                {
+                    role.parent = None;
+                }
+            });
+        }
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
