@@ -19,7 +19,7 @@ use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
 use smithay::backend::renderer::element::{
-    Kind, RenderElementStates, default_primary_scanout_output_compare,
+    Element, Kind, RenderElementStates, default_primary_scanout_output_compare,
 };
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::{Color32F, ImportAll, Renderer};
@@ -57,13 +57,18 @@ pub(crate) fn background(content: Content) -> Color32F {
 
 pub(crate) fn elements<R: Renderer + ImportAll>(
     renderer: &mut R,
+    output: &Output,
     windows: &[Window],
     placements: &[Placement],
 ) -> Vec<WaylandSurfaceRenderElement<R>>
 where
     R::TextureId: Clone + 'static,
 {
-    let mut elements = Vec::new();
+    let Some(mode) = output.current_mode() else {
+        return Vec::new();
+    };
+    let viewport = Rectangle::from_size(mode.size);
+    let mut elements: Vec<WaylandSurfaceRenderElement<R>> = Vec::new();
     for (id, rect) in placements.iter().rev() {
         let Some(window) = windows.iter().find(|window| window.id == *id) else {
             continue;
@@ -88,6 +93,9 @@ where
             Kind::Unspecified,
         ));
     }
+    // DRM can mark every element below an opaque fullscreen buffer as skipped,
+    // even one outside the output. Keep the render states tied to this viewport.
+    elements.retain(|element| viewport.overlaps(element.geometry(1.0.into())));
     elements
 }
 
@@ -480,7 +488,8 @@ impl State {
         let rendered = match &mut self.backend {
             Backend::Headless(backend) => {
                 let placements = if protected { &[][..] } else { &self.placements };
-                let elements = elements(backend.renderer(), &self.windows, placements);
+                let elements =
+                    elements(backend.renderer(), &self.output, &self.windows, placements);
                 backend
                     .render_scene(&elements, background(content), force_full_redraw)
                     .map(|(damaged, states)| {
@@ -600,11 +609,16 @@ impl State {
 
     /// Records which surfaces this frame shows, and tells them that they are
     /// on the output.
-    fn update_primary_scanout_output(&self, states: &RenderElementStates) {
+    pub(super) fn update_primary_scanout_output(&self, states: &RenderElementStates) {
         for window in &self.windows {
-            let placed =
-                self.session_visible() && self.placements.iter().any(|(id, _)| *id == window.id);
             with_surfaces_surface_tree(window.toplevel.wl_surface(), |surface, data| {
+                // Fully occluded elements still belong to the output. Use the
+                // submitted frame, even if clients changed state during a fence wait.
+                if states.element_render_state(surface).is_some() {
+                    self.output.enter(surface);
+                } else {
+                    self.output.leave(surface);
+                }
                 update_surface_primary_scanout_output(
                     surface,
                     &self.output,
@@ -613,11 +627,6 @@ impl State {
                     states,
                     default_primary_scanout_output_compare,
                 );
-                if placed {
-                    self.output.enter(surface);
-                } else {
-                    self.output.leave(surface);
-                }
             });
         }
     }

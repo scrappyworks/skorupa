@@ -6,6 +6,8 @@ pub mod headless;
 pub mod layout;
 mod session_lock;
 mod state;
+#[cfg(test)]
+mod test_support;
 
 use std::error::Error;
 use std::io;

@@ -253,6 +253,30 @@ fn req_layout_004_unmapped_parent_stays_detached_after_remap() {
 }
 
 #[test]
+fn req_api_001_subsurface_leaves_and_reenters_as_it_crosses_output_bounds() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let root = fixture.map(&mut client, RED);
+    let (child, role) = client.create_subsurface(&root.surface);
+    let buffer = client.buffer(2, 2, Format::Xrgb8888, BLUE);
+    child.attach(Some(&buffer), 0, 0);
+    child.commit();
+    root.surface.commit();
+    fixture.sync(&mut client);
+
+    // Only the child moves, and the root remains mapped on the output.
+    for (x, expected, frame) in [(WIDTH, false, 1), (WIDTH - 1, true, 2)] {
+        role.set_position(x, 0);
+        root.surface.commit();
+        fixture.sync(&mut client);
+        fixture.advance_to(START + HZ_60 * frame);
+        client.read();
+        assert_eq!(client.data.on_output(&child), expected);
+        assert!(client.data.on_output(&root.surface));
+    }
+}
+
+#[test]
 fn req_layout_003_setting_an_unmapped_parent_keeps_the_child_independent() {
     let mut fixture = Fixture::new(config());
     let mut client = fixture.connect();
