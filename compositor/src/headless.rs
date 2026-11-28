@@ -4,6 +4,7 @@
 
 use std::error::Error;
 
+use skorupa_compositor_core::layout::MAX_OUTPUT_SIDE;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::RenderElementStates;
@@ -28,8 +29,11 @@ pub struct Headless {
 impl Headless {
     /// # Errors
     ///
-    /// When Pixman cannot create the renderer or the image.
+    /// When either dimension falls outside the layout bounds or Pixman cannot create the image.
     pub fn new(output: &Output, size: Size<i32, Physical>) -> Result<Self, Box<dyn Error>> {
+        if !(1..=MAX_OUTPUT_SIDE).contains(&size.w) || !(1..=MAX_OUTPUT_SIDE).contains(&size.h) {
+            return Err("headless output dimensions exceed the supported layout range".into());
+        }
         let mut renderer = PixmanRenderer::new()?;
         let size = Size::from((size.w, size.h));
         let image = renderer.create_buffer(Fourcc::Argb8888, size)?;
