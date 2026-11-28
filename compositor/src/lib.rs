@@ -122,6 +122,13 @@ impl Compositor {
             .and_then(SessionLock::pending_ui)
     }
 
+    /// Reports that the trusted lock UI identified by `ui` exited or failed
+    /// to start. Its attempt ends before any later verdict is handled. An
+    /// exit reported for a retired UI has no effect on its replacement.
+    pub fn lock_ui_exited(&mut self, now: Clocks, ui: u32) {
+        self.state.lock_event_at(now, lock::Event::UiExited { ui });
+    }
+
     /// Opens the attempt for the serial from [`Self::pending_lock_ui`].
     /// The serial must still be current and its scheduled time must have arrived.
     pub fn open_lock_attempt(&mut self, now: Clocks, ui: u32) {

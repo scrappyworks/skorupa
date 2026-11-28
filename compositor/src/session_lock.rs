@@ -38,7 +38,6 @@ pub(crate) struct SessionLock {
     authd: Option<Authd>,
     session: SessionId,
     pending_ui: Option<(u32, Duration)>,
-    deadline: Option<Duration>,
 }
 
 impl SessionLock {
@@ -68,7 +67,6 @@ impl SessionLock {
                 authd,
                 session,
                 pending_ui: None,
-                deadline: None,
             },
             effects,
         ))
@@ -110,7 +108,7 @@ impl SessionLock {
     }
 
     pub(crate) const fn deadline(&self) -> Option<Duration> {
-        self.deadline
+        self.reducer.attempt_deadline()
     }
 
     fn step(&mut self, event: Event) -> Vec<Effect> {
@@ -191,12 +189,8 @@ impl State {
                 }
                 Effect::StopUi { .. } => {
                     session.pending_ui = None;
-                    session.deadline = None;
                 }
-                Effect::SendChallenge {
-                    binding, deadline, ..
-                } => {
-                    session.deadline = Some(deadline);
+                Effect::SendChallenge { binding, .. } => {
                     channel_failed |= session.send_challenge(binding).is_err();
                 }
                 // Capture, grant consumers and the logind bridge are not
@@ -433,6 +427,39 @@ mod tests {
             .unwrap();
         assert_eq!(compositor.state.flips, flips);
         assert_eq!(compositor.session_phase(), Some(lock::Phase::Locking));
+    }
+
+    #[test]
+    fn req_auth_004_ui_exit_before_verdict_closes_only_its_own_attempt() {
+        let (mut compositor, mut peer) = covered();
+        let now = Clocks::exact(BOOT, BOOT);
+        assert!(compositor.end_sleep_hold(now, compositor.sleep_hold_token().unwrap()));
+        let (ui, _) = compositor.pending_lock_ui().unwrap();
+        compositor.open_lock_attempt(now, ui);
+        write_message(&mut peer, Message::Verdict(verdict()));
+        compositor.lock_ui_exited(now, ui);
+        compositor.dispatch_at(now).unwrap();
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Locked));
+        let (next_ui, ready) = compositor.pending_lock_ui().unwrap();
+        assert_ne!(ui, next_ui);
+        assert!(ready > BOOT);
+        assert_eq!(
+            compositor.state.session_lock.as_ref().unwrap().deadline(),
+            None
+        );
+
+        let now = Clocks::exact(ready, ready);
+        compositor.open_lock_attempt(now, next_ui);
+        compositor.lock_ui_exited(now, ui);
+        write_message(
+            &mut peer,
+            Message::Verdict(Verdict {
+                attempt: Attempt(2),
+                ..verdict()
+            }),
+        );
+        compositor.dispatch_at(now).unwrap();
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Unlocked));
     }
 
     fn verdict() -> Verdict {
