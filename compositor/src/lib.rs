@@ -237,7 +237,7 @@ impl Compositor {
         self.display.backend().poll_fd()
     }
 
-    /// Presses or releases a key of the seat's keyboard.
+    /// Presses or releases an XKB keycode on the seat. Values below 8 are ignored.
     /// With the session lock enabled this reads both system clocks. Use
     /// [`Self::key_at`] to supply controlled times for the lock and seat.
     pub fn key(&mut self, keycode: u32, pressed: bool, now: Duration) {
@@ -248,7 +248,7 @@ impl Compositor {
         }
     }
 
-    /// Checks the sleep clocks before routing a key from the seat.
+    /// Checks the sleep clocks before routing an XKB keycode from the seat, as in [`Self::key`].
     pub fn key_at(&mut self, keycode: u32, pressed: bool, now: Clocks) {
         self.state.lock_clock(now);
         self.state.key(keycode, pressed, now.monotonic);
