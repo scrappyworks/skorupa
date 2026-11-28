@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use skorupa_compositor_core::frame_clock::FramePacer;
 use smithay::backend::input::{InputTime, KeyState};
-use smithay::backend::renderer::utils::on_commit_buffer_handler;
+use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::backend::renderer::{ImportMemWl, buffer_dimensions};
 use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::input::keyboard::{FilterResult, XkbConfig};
@@ -80,6 +80,7 @@ impl Config {
 pub(crate) struct Window {
     pub(crate) id: WindowId,
     pub(crate) toplevel: ToplevelSurface,
+    mapped: bool,
 }
 
 /// Per-client data that Smithay asks for.
@@ -193,9 +194,7 @@ impl State {
         for window in &self.windows {
             let shown = self.placements.iter().find(|(id, _)| *id == window.id);
             window.toplevel.with_pending_state(|state| {
-                if let Some((_, rect)) = shown {
-                    state.size = Some(rect.size);
-                }
+                state.size = Some(shown.map_or(self.output_size(), |(_, rect)| rect.size));
                 // Edge to edge: no shadows or rounded corners to draw.
                 for edge in [
                     xdg_toplevel::State::TiledLeft,
@@ -306,15 +305,26 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
-        let toplevel = self
+        if let Some(window) = self
             .windows
-            .iter()
-            .map(|window| &window.toplevel)
-            .find(|toplevel| toplevel.wl_surface() == surface);
-        if let Some(toplevel) = toplevel
-            && !toplevel.is_initial_configure_sent()
+            .iter_mut()
+            .find(|window| window.toplevel.wl_surface() == surface)
         {
-            toplevel.send_configure();
+            let mapped = with_renderer_surface_state(surface, |state| state.buffer().is_some())
+                .unwrap_or(false);
+            if mapped != window.mapped {
+                window.mapped = mapped;
+                if mapped {
+                    self.layout.window_added(window.id);
+                } else {
+                    self.layout.window_removed(window.id);
+                }
+                self.arrange();
+                return;
+            }
+            if !window.toplevel.is_initial_configure_sent() {
+                window.toplevel.send_configure();
+            }
         }
         self.queue_redraw();
     }
@@ -341,8 +351,8 @@ impl XdgShellHandler for State {
         self.windows.push(Window {
             id,
             toplevel: surface,
+            mapped: false,
         });
-        self.layout.window_added(id);
         self.arrange();
     }
 
@@ -355,8 +365,10 @@ impl XdgShellHandler for State {
             return;
         };
         let window = self.windows.remove(index);
-        self.layout.window_removed(window.id);
-        self.arrange();
+        if window.mapped {
+            self.layout.window_removed(window.id);
+            self.arrange();
+        }
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {

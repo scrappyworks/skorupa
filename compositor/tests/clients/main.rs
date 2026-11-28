@@ -148,8 +148,8 @@ fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
     fixture.sync(&mut client);
     assert_eq!(client.data.configures.len(), 1);
     assert_eq!(client.data.configures[0].size, (WIDTH, HEIGHT));
-    assert!(client.data.configures[0].activated());
-    assert_eq!(client.data.keys, [Key::Keymap, Key::Enter]);
+    assert!(!client.data.configures[0].activated());
+    assert_eq!(client.data.keys, [Key::Keymap]);
     assert_eq!(client.data.frames, []);
 
     let buffer = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, RED);
@@ -158,7 +158,9 @@ fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
     assert_eq!(fixture.color(), RED);
     assert!(client.data.on_output);
     assert_eq!(client.data.frames, [millis(START)]);
-    assert_eq!(client.data.configures.len(), 1);
+    assert_eq!(client.data.configures.len(), 2);
+    assert!(client.data.configures[1].activated());
+    assert_eq!(client.data.keys, [Key::Keymap, Key::Enter]);
     assert!(client.protocol_error().is_none());
 }
 
@@ -306,15 +308,23 @@ fn req_input_002_keys_reach_only_the_focused_client() {
     let mut first = fixture.connect();
     fixture.map(&mut first, RED);
     let mut second = fixture.connect();
-    fixture.map(&mut second, BLUE);
+    let window = second.create_window();
+    fixture.sync(&mut second);
+    fixture.sync(&mut first);
+    assert_eq!(first.data.keys, [Key::Keymap, Key::Enter]);
+    assert_eq!(second.data.keys, [Key::Keymap]);
+
+    let buffer = second.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    second.commit(&window, Some(&buffer));
+    fixture.sync(&mut second);
     fixture.sync(&mut first);
 
-    // The newest toplevel has the focus; the older one was told so.
+    // The newest mapped toplevel has the focus; the older one was told so.
     assert_eq!(first.data.keys, [Key::Keymap, Key::Enter, Key::Leave]);
     assert_eq!(second.data.keys, [Key::Keymap, Key::Enter]);
-    assert_eq!(first.data.configures.len(), 2);
-    assert!(!first.data.configures[1].activated());
-    assert!(second.data.configures[0].activated());
+    assert_eq!(first.data.configures.len(), 3);
+    assert!(!first.data.configures[2].activated());
+    assert!(second.data.configures[1].activated());
 
     // XKB keycode 38 is the evdev key 30 that clients see.
     let time = fixture.now + Duration::from_millis(7);
