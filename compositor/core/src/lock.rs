@@ -127,8 +127,8 @@ impl SleepWatch {
 
     /// Whether the machine slept since the last sleep this watch reported.
     ///
-    /// Sleeps below the threshold add up until they pass it. A difference
-    /// that shrinks cannot come from real clocks and counts as a sleep too.
+    /// Sleeps below the threshold add up until they pass it. A shrinking
+    /// offset cannot prove a resume; a stale sample leaves the baseline in place.
     pub fn slept(&mut self, now: Clocks) -> bool {
         self.observe(now) == ClockChange::Resumed
     }
@@ -136,9 +136,7 @@ impl SleepWatch {
     pub(crate) fn observe(&mut self, now: Clocks) -> ClockChange {
         let (least, most) = now.sleep_bounds();
         let (old_least, old_most) = self.asleep;
-        if least.saturating_sub(old_most) > self.threshold
-            || old_least.saturating_sub(most) > self.threshold
-        {
+        if least.saturating_sub(old_most) > self.threshold {
             self.asleep = (least, most);
             return ClockChange::Resumed;
         }

@@ -1169,3 +1169,30 @@ fn req_lock_026_stale_bridge_report_does_not_end_the_current_hold() {
     assert!(restart_delay(&rig.bridge_report()).is_some());
     assert_eq!(rig.state.hold_token(), None);
 }
+
+#[test]
+fn req_lock_026_older_clock_offsets_cannot_release_a_later_sleep_hold() {
+    let mut rig = Rig::locked();
+    let before_resume = rig.now;
+    rig.sleep();
+    rig.send(Event::Tick);
+    rig.present(Content::Protected);
+    rig.send(Event::PrepareForSleep { nonce: 9 });
+    let hold = rig.state.hold_token().unwrap();
+    let current = rig.now;
+
+    // A delayed sample from before the previous suspend is no evidence that
+    // the new sleep has happened. Recovery of the clock is not a second wake.
+    rig.now = before_resume;
+    rig.send(Event::Tick);
+    assert_eq!(rig.state.phase(), Phase::Locking);
+    assert_eq!(rig.state.hold_token(), Some(hold));
+    rig.now = current;
+    rig.present(Content::Protected);
+    assert_eq!(rig.state.hold_token(), Some(hold));
+    assert!(
+        rig.bridge_report()
+            .iter()
+            .any(|effect| matches!(effect, Effect::StartUi { .. }))
+    );
+}
