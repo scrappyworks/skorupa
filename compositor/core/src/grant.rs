@@ -447,6 +447,9 @@ impl State {
                 effects.push(Effect::FreezeAgents);
             }
             Event::Requested(request) => {
+                // A prompt may have expired at the start of this step. Its successor
+                // occupies the prompt slot before we count the waiting requests.
+                self.show_next(now.boottime, effects);
                 let cause =
                     request.denial_reason(lock.unlocked, self.agent_capture, self.queue.len());
                 match cause {
