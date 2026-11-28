@@ -3,6 +3,8 @@
 //! Stage 1 offers `wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat` with a
 //! keyboard, `wl_output` and `wp_presentation`, each for every client.
 
+mod admission;
+
 use std::error::Error;
 use std::time::Duration;
 
@@ -474,8 +476,11 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        let id = WindowId(self.next_window_id);
-        self.next_window_id += 1;
+        let Some(id) = admission::take_window_id(&mut self.next_window_id, self.windows.len())
+        else {
+            admission::window_limit_reached(surface.wl_surface());
+            return;
+        };
         self.windows.push(Window {
             id,
             toplevel: surface,
