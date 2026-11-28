@@ -346,11 +346,20 @@ impl State {
                         // below will pace protected retries.
                         self.lock_event(LockEvent::RenderFailed);
                     }
-                    let immediate = if outcome == RenderOutcome::Submitted {
+                    let (now, immediate) = if outcome == RenderOutcome::Submitted {
                         self.lock_event(LockEvent::FrameSubmitted(content));
-                        self.immediate_presentation(now, sample)
+                        // Rendering and a blocking KMS commit can advance the clock.
+                        // The watchdog starts at submission. An immediate presentation
+                        // uses that same sample and has no retrace counter.
+                        let finished = sample();
+                        self.lock_clock(finished);
+                        let immediate = match &self.backend {
+                            Backend::Headless(_) => true,
+                            Backend::Drm(backend) => backend.committed_synchronously(),
+                        };
+                        (finished.monotonic, immediate)
                     } else {
-                        None
+                        (now, false)
                     };
                     self.pace(
                         now,
@@ -361,14 +370,14 @@ impl State {
                         },
                         sample,
                     );
-                    if let Some((at, sequence)) = immediate {
+                    if immediate {
                         self.lock_event(LockEvent::FramePresented(content));
                         self.pace(
-                            at,
+                            now,
                             Event::FlipCompleted {
-                                now: at,
+                                now,
                                 time: None,
-                                sequence,
+                                sequence: 0,
                             },
                             sample,
                         );
@@ -417,28 +426,6 @@ impl State {
                 }
                 Effect::Anomaly(anomaly) => warn!(?anomaly, "frame pacer anomaly"),
             }
-        }
-    }
-
-    /// Called just after submission, before the pacer can send client callbacks.
-    fn immediate_presentation(
-        &mut self,
-        now: Duration,
-        sample: &mut impl FnMut() -> Clocks,
-    ) -> Option<(Duration, u32)> {
-        match &self.backend {
-            Backend::Headless(_) => {
-                self.flips = self.flips.wrapping_add(1);
-                Some((now, self.flips))
-            }
-            Backend::Drm(backend) if backend.committed_synchronously() => {
-                // The blocking commit has returned. Check for resume before
-                // releasing callbacks and use software time with unknown MSC.
-                let clocks = sample();
-                self.lock_clock(clocks);
-                Some((clocks.monotonic, 0))
-            }
-            Backend::Drm(_) => None,
         }
     }
 

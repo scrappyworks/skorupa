@@ -610,8 +610,8 @@ fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {
             Some(&Presented {
                 time: expected,
                 refresh: interval,
-                // The flips before it: the empty first frame and `frame` of ours.
-                sequence: u64::from(frame) + 2,
+                // Pixman has no vertical retrace counter.
+                sequence: 0,
                 flags: 0,
             })
         );
@@ -628,6 +628,29 @@ fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {
     assert_eq!(fixture.compositor.next_deadline(), None);
     client.read();
     assert_eq!(client.data.presented.len(), 20);
+}
+
+#[test]
+fn req_perf_015_headless_feedback_uses_the_clock_after_the_draw() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let window = fixture.map(&mut client, RED);
+    let start = START + Duration::from_secs(1);
+    fixture.advance_to(start);
+    let finished = start + Duration::from_millis(7);
+    let buffer = client.buffer(WIDTH, HEIGHT, Format::Xrgb8888, BLUE);
+    client.commit(&window, Some(&buffer));
+    client.flush();
+
+    let mut clock = [start].into_iter();
+    fixture
+        .compositor
+        .dispatch_timeout(|| clock.next().unwrap_or(finished))
+        .unwrap();
+    client.read();
+    let feedback = client.data.presented.last().unwrap();
+    assert_eq!(feedback.time, finished);
+    assert_eq!(feedback.sequence, 0);
 }
 
 /// REQ-API-001, REQ-PERF-015: `wl_output` uses mHz, presentation uses `u32` nanoseconds.
@@ -678,7 +701,8 @@ fn req_perf_012_time_spent_dispatching_counts_towards_the_frame_deadline() {
     client.flush();
 
     let draw_cost = Duration::from_millis(5);
-    let mut times = [START, START + draw_cost].into_iter();
+    // The same clock supplies render completion and the subsequent poll calculation.
+    let mut times = [START, START + draw_cost, START + draw_cost].into_iter();
     let wait = fixture
         .compositor
         .dispatch_timeout(|| times.next().unwrap())

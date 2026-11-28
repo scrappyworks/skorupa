@@ -494,11 +494,11 @@ mod tests {
         let resumed = Clocks::exact(now, now + Duration::from_secs(60));
         let mut samples = [Clocks::exact(now, now); 2].into_iter();
         compositor.state.queue_redraw();
-        let flips = compositor.state.flips;
+        let cycle = compositor.state.pacer.frame_callback_sequence();
         compositor
             .dispatch_with_clock(now, &mut || samples.next().unwrap_or(resumed))
             .unwrap();
-        assert_eq!(compositor.state.flips, flips);
+        assert_eq!(compositor.state.pacer.frame_callback_sequence(), cycle);
         assert_eq!(compositor.session_phase(), Some(lock::Phase::Locking));
     }
 
