@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use skorupa_compositor::core::lock::{Config, InstanceId, Phase, SessionId};
+use skorupa_compositor::core::lock::{Clocks, Config, InstanceId, Phase, SessionId};
 use skorupa_compositor::protocol::{
     Attempt, Challenge, MAX_FRAME_LEN, Message, Outcome, PREFIX_LEN, Verdict, decode, frame_len,
 };
@@ -75,9 +75,6 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         session: SessionId(session),
         jump_threshold: Duration::from_secs(1),
     };
-    compositor.enable_session_lock(config, read_lock_clocks(), private_channel)?;
-    let startup_token = compositor.sleep_hold_token().ok_or("no startup hold")?;
-
     let listener = ListeningSocketSource::new_auto()?;
     handle.insert_source(listener, |stream, (), compositor| {
         if let Err(err) = compositor.add_client(stream) {
@@ -90,11 +87,14 @@ fn run_seat(control: &Path) -> Result<(), Box<dyn Error>> {
         |_, _, _| Ok(PostAction::Continue),
     )?;
 
-    // Submit the startup cover before the loop can deliver its KMS event.
-    compositor.dispatch(read_lock_clocks().monotonic)?;
-    if compositor.session_phase() != Some(Phase::Locking) {
-        return Err("lock acknowledged before dispatching the KMS completion".into());
-    }
+    fail_setup_without_kms(&mut compositor, config, control)?;
+    let now = read_lock_clocks();
+    compositor.enable_session_lock(config, now, private_channel)?;
+    // This lock has no KMS confirmation of its own yet.
+    expect_lock(&compositor, Phase::Locking)?;
+    wait_for_dark(&mut compositor, now.monotonic)?;
+    let startup_token = compositor.sleep_hold_token().ok_or("no startup hold")?;
+    wake_with_queued_flip(&mut compositor, &mut event_loop)?;
 
     let mut startup_marked = false;
     let mut startup_released = false;
@@ -190,6 +190,42 @@ fn switch_without_kms(
     Ok(())
 }
 
+// REQ-LOCK-011: an invalid authentication configuration still has to hide
+// the previous session frame when the notifier withholds its completion.
+fn fail_setup_without_kms(
+    compositor: &mut Compositor,
+    config: Config,
+    control: &Path,
+) -> Result<(), Box<dyn Error>> {
+    // Submit a session frame and withhold its completion while lock setup fails.
+    compositor.dispatch(read_lock_clocks().monotonic)?;
+    let invalid = Config {
+        session: SessionId([0; 32]),
+        ..config
+    };
+    let (socket, _peer) = UnixStream::pair()?;
+    if !matches!(
+        compositor.enable_session_lock(invalid, read_lock_clocks(), socket),
+        Err(err) if err.kind() == io::ErrorKind::InvalidInput
+    ) {
+        return Err("invalid session was not rejected".into());
+    }
+    wait_for_dark(compositor, read_lock_clocks().monotonic)?;
+    fs::write(control.join("setup-failed-dark"), [])?;
+    wait_for_marker(&control.join("retry-setup"))?;
+
+    // REQ-LOCK-002/015: the first clear predates a possible resume. Retry
+    // before the provisional lock has a chance to obtain fresh KMS evidence.
+    let now = read_lock_clocks();
+    let uncertain = Clocks::bracketed(
+        now.boottime,
+        now.monotonic,
+        now.boottime + Duration::from_secs(10),
+    );
+    compositor.request_lock(uncertain);
+    expect_lock(compositor, Phase::Locking)
+}
+
 fn lock_without_kms(
     compositor: &mut Compositor,
     event_loop: &mut EventLoop<'_, Compositor>,
@@ -197,8 +233,15 @@ fn lock_without_kms(
 ) -> Result<(), Box<dyn Error>> {
     let now = read_lock_clocks();
     compositor.request_lock(now);
-    // Stop reading KMS events while the compositor still services its timers.
-    let end = now.monotonic + Duration::from_secs(1);
+    wait_for_dark(compositor, now.monotonic)?;
+    fs::write(control.join("fallback-dark"), [])?;
+    wait_for_marker(&control.join("resume-kms"))?;
+    wake_with_queued_flip(compositor, event_loop)
+}
+
+// Stop reading KMS events while the compositor still services its timers.
+fn wait_for_dark(compositor: &mut Compositor, start: Duration) -> Result<(), Box<dyn Error>> {
+    let end = start + Duration::from_secs(1);
     loop {
         compositor.dispatch(read_lock_clocks().monotonic)?;
         if read_lock_clocks().monotonic > end {
@@ -209,10 +252,13 @@ fn lock_without_kms(
         }
         thread::sleep(CONTROL_POLL);
     }
-    expect_lock(compositor, Phase::Locked)?;
-    fs::write(control.join("fallback-dark"), [])?;
-    wait_for_marker(&control.join("resume-kms"))?;
+    expect_lock(compositor, Phase::Locked)
+}
 
+fn wake_with_queued_flip(
+    compositor: &mut Compositor,
+    event_loop: &mut EventLoop<'_, Compositor>,
+) -> Result<(), Box<dyn Error>> {
     // Queue the wake while the old completion is still held by the notifier.
     compositor.key_at(38, true, read_lock_clocks());
     expect_lock(compositor, Phase::Locked)?;

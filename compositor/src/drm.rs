@@ -164,6 +164,12 @@ enum OutputPower {
     WakeRequested,
 }
 
+impl OutputPower {
+    fn off_on_active_seat(&self, seat_active: bool) -> bool {
+        seat_active && *self != Self::On
+    }
+}
+
 pub(crate) enum DrmFlip {
     Presented(Content),
     Expired,
@@ -401,15 +407,27 @@ impl Drm {
     }
 
     pub(crate) fn ready_to_render(&self, content: Content) -> bool {
-        self.can_blank() && self.frames.submission(content).is_some()
+        self.output_on() && self.frames.submission(content).is_some()
     }
 
     pub(crate) fn committed_synchronously(&self) -> bool {
         matches!(self.frames.pending_flip, Some(PendingFlip::Retired))
     }
 
-    pub(crate) fn can_blank(&self) -> bool {
+    // The last known power state is a scheduling hint. A new lock still
+    // needs its own successful KMS clear before it can acknowledge.
+    pub(crate) fn was_off(&self) -> bool {
+        self.power.off_on_active_seat(self.active)
+    }
+
+    pub(crate) fn output_on(&self) -> bool {
         self.active && self.power == OutputPower::On
+    }
+
+    pub(crate) fn can_blank(&self) -> bool {
+        // A new cover may need fresh KMS confirmation while the output is
+        // already dark. Only the active seat may issue the atomic clear.
+        self.active
     }
 
     pub(crate) fn blank(&mut self) -> Result<(), smithay::backend::drm::DrmError> {
@@ -420,7 +438,9 @@ impl Drm {
         if self.frames.pending_flip.is_some() {
             self.frames.pending_flip = Some(PendingFlip::Retired);
         }
-        self.power = OutputPower::Off;
+        if self.power == OutputPower::On {
+            self.power = OutputPower::Off;
+        }
         Ok(())
     }
 
