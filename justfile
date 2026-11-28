@@ -13,7 +13,7 @@ deny_flags := "--warn unmaintained --allow unmatched-source --allow unused-wrapp
 default:
     @just --list --unsorted
 
-# The merge gate. Checks formatting and changes no file.
+# Local checks verify formatting and leave the source tree unchanged.
 check: (lint-test "Cargo.toml") (lint-test "compositor/Cargo.toml") lint-fuzz budget req-lint fuzz-smoke-config deny
 
 # Clippy and the tests come from ONE compilation: Cargo builds the test
@@ -92,12 +92,16 @@ prove-unlock:
 prove-grants:
     cargo kani --manifest-path compositor/Cargo.toml -p skorupa-compositor-core --lib --harness "grant::proofs::" --output-format terse
 
+# REQ-OPS-010 and REQ-OPS-011: run the chosen Quint model and both Kani suites before merging.
+check-merge: check
+    {{ nix }} build --no-link .#checks.x86_64-linux.proof-protocol .#checks.x86_64-linux.proof-core .#checks.x86_64-linux.quint-scenarios
+
 # Everything available in the Nix development shell.
 check-all: check flake-check
 
 # Set MERGE_GATE_CHANGE=1 when the branch changes the gate itself.
 #
-# Merge the pushed branch into main as one squash commit, after a green `just check` on that commit.
+# Merge the pushed branch into main as one squash commit, after a green `just check-merge` on that commit.
 merge: hooks
     scripts/merge.sh
 

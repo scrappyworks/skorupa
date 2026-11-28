@@ -229,5 +229,6 @@ Lines of Rust code counted by `tokei`, tests included, charged to the component 
 
 - `just check` runs formatting, Clippy with `-D warnings`, tests, `cargo deny` and the budget.
 - `main` changes only through pull requests, squash-merged as "Title (#N)" by `just merge`
-  after `just check` passed on the exact head commit.
+  after `just check-merge` passes on the exact head commit. It runs `just check` and the pinned
+  Nix checks for the Kani proofs and the chosen Quint scenarios.
 - niri code is ported file by file with its authorship and a record of the source revision.
