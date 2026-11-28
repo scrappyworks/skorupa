@@ -330,7 +330,40 @@ mod proofs {
         let input: [u8; CAP] = kani::any();
         let end = usize::from(kani::any::<u8>());
         kani::assume(end <= CAP);
-        if let Ok((message, used)) = decode(&input[..end]) {
+        let decoded = decode(&input[..end]);
+        // The v1 binding has 16 instance bytes, 8 epoch bytes and 4 attempt
+        // bytes. A verdict also carries an outcome before the session length.
+        let len_at = match input[5] {
+            1 if matches!(input[34], 1 | 2) => Some(35),
+            2 => Some(34),
+            _ => None,
+        };
+        if let Some(at) = len_at
+            && input[4] == 1
+            && end == at + 1 + usize::from(input[at])
+            && input[..4] == ((end - 4) as u32).to_le_bytes()
+        {
+            let id = &input[at + 1..end];
+            let error = if id.is_empty() {
+                Some(SessionIdError::Empty)
+            } else {
+                id.iter()
+                    .find(|byte| !byte.is_ascii_alphanumeric())
+                    .map(|&found| SessionIdError::InvalidByte { found })
+            };
+            if let Some(error) = error {
+                assert_eq!(decoded, Err(DecodeError::InvalidSession(error)));
+                kani::cover!(
+                    input[5] == 1 && !id.is_empty(),
+                    "invalid verdict identifier"
+                );
+                kani::cover!(
+                    input[5] == 2 && !id.is_empty(),
+                    "invalid challenge identifier"
+                );
+            }
+        }
+        if let Ok((message, used)) = decoded {
             assert!(used <= end);
             let mut output = [0; CAP];
             assert_eq!(message.encode(&mut output), Ok(used));
