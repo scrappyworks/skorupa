@@ -652,6 +652,24 @@ fn req_auth_017_authd_disconnect_voids_the_open_attempt() {
     assert_eq!(rig.state.view().epoch, binding.epoch);
 }
 
+#[test]
+fn req_auth_017_disconnect_retires_the_ui_even_before_its_first_attempt() {
+    for connected in [false, true] {
+        let mut rig = Rig::locked();
+        let ui = rig.ui;
+        if connected {
+            rig.send(Event::UiConnected { ui });
+        }
+        let effects = rig.send(Event::AuthdDisconnected);
+        assert!(effects.contains(&Effect::StopUi { ui }));
+        assert_ne!(rig.ui, ui);
+        assert_eq!(rig.send(Event::UiConnected { ui }), []);
+        assert_eq!(rig.send(Event::AttemptOpened { ui }), []);
+        let binding = rig.open_attempt();
+        assert_eq!(binding, FIRST);
+    }
+}
+
 /// REQ-AUTH-018, REQ-TRUST-002: one attempt per UI process, so the channel
 /// the challenge names is never shared between attempts.
 #[test]

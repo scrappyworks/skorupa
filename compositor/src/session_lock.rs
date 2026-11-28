@@ -86,12 +86,27 @@ impl SessionLock {
         self.reducer.hold_token()
     }
 
+    pub(crate) fn attach_authd(&mut self, stream: UnixStream) -> io::Result<()> {
+        if self.authd.is_some() {
+            return Err(Error::new(
+                ErrorKind::AlreadyExists,
+                "authd already connected",
+            ));
+        }
+        self.authd = Some(Authd::new(stream)?);
+        Ok(())
+    }
+
     pub(crate) fn authd_fd(&self) -> Option<BorrowedFd<'_>> {
         self.authd.as_ref().map(|authd| authd.stream.as_fd())
     }
 
     pub(crate) const fn pending_ui(&self) -> Option<(u32, Duration)> {
-        self.pending_ui
+        if self.authd.is_some() {
+            self.pending_ui
+        } else {
+            None
+        }
     }
 
     pub(crate) const fn deadline(&self) -> Option<Duration> {
@@ -172,10 +187,7 @@ impl State {
                 }
                 Effect::Unlock { .. } => self.queue_redraw(),
                 Effect::StartUi { ui, delay } => {
-                    session.pending_ui = session
-                        .authd
-                        .as_ref()
-                        .map(|_| (ui, session.now.monotonic.saturating_add(delay)));
+                    session.pending_ui = Some((ui, session.now.monotonic.saturating_add(delay)));
                 }
                 Effect::StopUi { .. } => {
                     session.pending_ui = None;
@@ -235,7 +247,6 @@ impl State {
             return;
         };
         session.authd = None;
-        session.pending_ui = None;
         self.lock_event(Event::AuthdDisconnected);
         self.lock_event(Event::LockRequested);
     }

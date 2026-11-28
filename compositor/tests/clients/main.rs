@@ -768,7 +768,6 @@ fn req_lock_011_pending_cover_precedes_ordinary_wayland_dispatch() {
 fn req_auth_001_only_a_current_private_verdict_restores_the_session() {
     let mut fixture = Fixture::new(config());
     let (socket, mut peer) = UnixStream::pair().unwrap();
-    peer.set_nonblocking(true).unwrap();
     let mut session = [0; protocol::SessionId::MAX_LEN];
     session[..2].copy_from_slice(b"c2");
     fixture
@@ -847,7 +846,69 @@ fn req_auth_001_only_a_current_private_verdict_restores_the_session() {
     assert_eq!(fixture.color(), BLUE);
 }
 
+#[test]
+fn req_auth_017_a_restarted_broker_must_answer_a_fresh_challenge() {
+    let mut fixture = Fixture::new(config());
+    let (socket, mut old_peer) = UnixStream::pair().unwrap();
+    let mut session = [0; protocol::SessionId::MAX_LEN];
+    session[..2].copy_from_slice(b"c2");
+    let now = lock_clocks(fixture.now);
+    fixture
+        .compositor
+        .enable_session_lock(
+            lock::Config {
+                instance: lock::InstanceId([7; 16]),
+                session: lock::SessionId(session),
+                jump_threshold: Duration::from_secs(1),
+            },
+            now,
+            socket,
+        )
+        .unwrap();
+    fixture.advance_to(fixture.now + HZ_60);
+    let token = fixture.compositor.sleep_hold_token().unwrap();
+    assert!(
+        fixture
+            .compositor
+            .end_sleep_hold(lock_clocks(fixture.now), token)
+    );
+    let old = open_attempt(&mut fixture, &mut old_peer);
+    send_verdict(&mut old_peer, old);
+    drop(old_peer);
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locked));
+    assert!(fixture.compositor.pending_lock_ui().is_none());
+
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    fixture.compositor.reattach_authd(socket).unwrap();
+    let (duplicate, _unused) = UnixStream::pair().unwrap();
+    assert_eq!(
+        fixture
+            .compositor
+            .reattach_authd(duplicate)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::AlreadyExists,
+    );
+    let (_, ready) = fixture.compositor.pending_lock_ui().unwrap();
+    fixture.advance_to(ready);
+    let new = open_attempt(&mut fixture, &mut peer);
+    assert_eq!(new.compositor_instance, old.compositor_instance);
+    assert_eq!(new.session, old.session);
+    assert_eq!(new.epoch, old.epoch);
+    assert!(new.attempt > old.attempt);
+    send_verdict(&mut peer, old);
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Locked));
+    send_verdict(&mut peer, new);
+    fixture.advance_to(fixture.now + HZ_60);
+    assert_eq!(fixture.compositor.session_phase(), Some(Phase::Unlocked));
+}
+
 fn open_attempt(fixture: &mut Fixture, peer: &mut UnixStream) -> Challenge {
+    // Opening an attempt writes its challenge synchronously. A missing write
+    // must fail the assertion instead of hanging the client test.
+    peer.set_nonblocking(true).unwrap();
     let (ui, ready) = fixture.compositor.pending_lock_ui().unwrap();
     assert!(ready <= fixture.now);
     fixture
