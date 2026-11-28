@@ -48,11 +48,7 @@ fn run() -> Result<Infallible, Box<dyn Error>> {
 
     let clock = Clock::<Monotonic>::new();
     loop {
-        let now = Duration::from(clock.now());
-        compositor.dispatch(now)?;
-        let timeout = compositor
-            .next_deadline()
-            .map(|deadline| deadline.saturating_sub(now));
+        let timeout = compositor.dispatch_timeout(|| Duration::from(clock.now()))?;
         event_loop.dispatch(timeout, &mut compositor)?;
     }
 }
