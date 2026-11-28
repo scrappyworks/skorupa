@@ -51,6 +51,13 @@ def verify_frame(name: str, covered: bool, workspace: int = 1) -> None:
     raise AssertionError(f"{name}: unexpected frame sample {observed}")
 
 
+with subtest("failed lock setup blanks KMS before a retry"):
+    wait_marker("setup-failed-dark")
+    assert machine.succeed("cat /sys/class/drm/card*-Virtual-*/enabled").strip() == "disabled"
+    machine.fail(f"test -e {control}/challenge-1")
+    signal("retry-setup")
+
+
 with subtest("startup holds input and presents only the cover"):
     machine.wait_until_succeeds(f"test -S {runtime}/wayland-1")
     wait_marker("startup-covered")

@@ -61,24 +61,33 @@ impl Compositor {
     ///
     /// # Errors
     /// Returns `AlreadyExists` for a second installation. An invalid session
-    /// identifier or socket setup error leaves input fenced and the cover queued.
+    /// identifier or socket setup error keeps the cover and its output-off
+    /// fallback active. The launcher can retry with a valid configuration.
     pub fn enable_session_lock(
         &mut self,
         config: lock::Config,
         now: Clocks,
         authd: UnixStream,
     ) -> io::Result<()> {
-        if self.state.session_lock.is_some() {
+        if self
+            .state
+            .session_lock
+            .as_ref()
+            .is_some_and(SessionLock::configured)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "session lock already enabled",
             ));
         }
-        self.state.set_session_visible(false);
-        let (session, effects) = SessionLock::start(config, now, authd)?;
-        self.state.session_lock = Some(session);
-        self.state.apply_lock_effects(effects);
-        Ok(())
+        let (mut session, effects) = SessionLock::start(config, now);
+        let setup = session.configure(config.session, authd);
+        // An unsuccessful retry must not reset the pending cover or its deadline.
+        if setup.is_ok() || self.state.session_lock.is_none() {
+            self.state.session_lock = Some(session);
+            self.state.apply_lock_effects(effects);
+        }
+        setup
     }
 
     /// The phase of the session lock, when enabled.
@@ -109,6 +118,15 @@ impl Compositor {
     /// requires a fresh inhibitor and sleep-state check before reporting.
     #[must_use]
     pub fn end_sleep_hold(&mut self, now: Clocks, token: lock::HoldToken) -> bool {
+        if !self
+            .state
+            .session_lock
+            .as_ref()
+            .is_some_and(SessionLock::configured)
+        {
+            self.state.lock_clock(now);
+            return false;
+        }
         self.state
             .lock_event_at(now, lock::Event::SleepOver { token });
         self.state

@@ -166,9 +166,9 @@ struct CoverTimer {
 }
 
 impl CoverTimer {
-    fn arm(&mut self, now: Duration) {
+    fn arm_at(&mut self, deadline: Duration) {
         if self.attempts == 0 && self.deadline.is_none() {
-            self.deadline = Some(now.saturating_add(COVER_TIMEOUT));
+            self.deadline = Some(deadline);
         }
     }
 
@@ -177,7 +177,7 @@ impl CoverTimer {
             *self = Self::default();
             return false;
         }
-        self.arm(now);
+        self.arm_at(now.saturating_add(COVER_TIMEOUT));
         if self.deadline.is_none_or(|at| now < at) {
             return false;
         }
@@ -249,8 +249,15 @@ struct LastFrameCallback(Cell<Option<u32>>);
 
 impl State {
     pub(crate) fn arm_cover_deadline(&mut self, now: Duration) {
-        if matches!(&self.backend, Backend::Drm(backend) if backend.can_blank()) {
-            self.timers.cover.arm(now);
+        if let Backend::Drm(backend) = &self.backend
+            && backend.can_blank()
+        {
+            let deadline = if backend.was_off() {
+                now
+            } else {
+                now.saturating_add(COVER_TIMEOUT)
+            };
+            self.timers.cover.arm_at(deadline);
         }
     }
 
@@ -524,7 +531,7 @@ impl State {
             DrmFlip::Expired => {
                 self.timers.cover.recovery_signal(now);
                 let woke = backend.wake_if_ready();
-                let ready = backend.can_blank();
+                let ready = backend.output_on();
                 if woke {
                     self.lock_event(LockEvent::OutputOn);
                 }
@@ -712,7 +719,7 @@ mod tests {
     #[test]
     fn req_lock_011_blanking_retries_are_bounded_and_rearm_on_recovery() {
         let mut timer = CoverTimer::default();
-        timer.arm(Duration::ZERO);
+        timer.arm_at(COVER_TIMEOUT);
         let mut now = COVER_TIMEOUT;
         for _ in 0..COVER_BLANK_ATTEMPTS {
             assert!(timer.blank_due(now, true));

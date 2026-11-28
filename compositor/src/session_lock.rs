@@ -36,18 +36,33 @@ pub(crate) struct SessionLock {
     reducer: lock::State,
     now: Clocks,
     authd: Option<Authd>,
-    session: SessionId,
+    // Installed only after both the identifier and the private socket validate.
+    session: Option<SessionId>,
     pending_ui: Option<(u32, Duration)>,
 }
 
 impl SessionLock {
-    pub(crate) fn start(
-        config: lock::Config,
-        now: Clocks,
-        stream: UnixStream,
-    ) -> io::Result<(Self, Vec<Effect>)> {
+    pub(crate) fn start(config: lock::Config, now: Clocks) -> (Self, Vec<Effect>) {
+        let (reducer, effects) = lock::State::start(config, now);
+        (
+            Self {
+                reducer,
+                now,
+                authd: None,
+                session: None,
+                pending_ui: None,
+            },
+            effects,
+        )
+    }
+
+    pub(crate) const fn configured(&self) -> bool {
+        self.session.is_some()
+    }
+
+    pub(crate) fn configure(&mut self, id: lock::SessionId, stream: UnixStream) -> io::Result<()> {
         // Reject nonzero padding so the wire ID round-trips to the reducer's ID.
-        let id = config.session.0;
+        let id = id.0;
         let end = id.iter().position(|&byte| byte == 0).unwrap_or(id.len());
         let (name, padding) = id.split_at(end);
         if padding.iter().any(|&byte| byte != 0) {
@@ -58,18 +73,9 @@ impl SessionLock {
         }
         let session =
             SessionId::new(name).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
-        let authd = Some(Authd::new(stream)?);
-        let (reducer, effects) = lock::State::start(config, now);
-        Ok((
-            Self {
-                reducer,
-                now,
-                authd,
-                session,
-                pending_ui: None,
-            },
-            effects,
-        ))
+        self.authd = Some(Authd::new(stream)?);
+        self.session = Some(session);
+        Ok(())
     }
 
     pub(crate) const fn phase(&self) -> lock::Phase {
@@ -85,10 +91,20 @@ impl SessionLock {
     }
 
     pub(crate) const fn hold_token(&self) -> Option<lock::HoldToken> {
-        self.reducer.hold_token()
+        if self.configured() {
+            self.reducer.hold_token()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn attach_authd(&mut self, stream: UnixStream) -> io::Result<()> {
+        if !self.configured() {
+            return Err(Error::new(
+                ErrorKind::NotConnected,
+                "session lock setup incomplete",
+            ));
+        }
         if self.authd.is_some() {
             return Err(Error::new(
                 ErrorKind::AlreadyExists,
@@ -131,7 +147,7 @@ impl SessionLock {
         let authd = self.authd.as_ref().ok_or_else(authd_disconnected)?;
         authd.send(Challenge {
             compositor_instance: CompositorInstance(binding.instance.0),
-            session: self.session,
+            session: self.session.ok_or_else(authd_disconnected)?,
             epoch: LockEpoch(binding.epoch),
             attempt: Attempt(binding.attempt),
         })
@@ -375,6 +391,59 @@ mod tests {
             .unwrap();
         compositor.dispatch_at(now).unwrap();
         (compositor, peer)
+    }
+
+    #[test]
+    fn req_lock_011_invalid_setup_still_requires_confirmed_cover() {
+        let mut compositor = Compositor::new(Config::default()).unwrap();
+        let now = Clocks::exact(BOOT, BOOT);
+        let invalid = lock::Config {
+            instance: lock::InstanceId([3; 16]),
+            session: lock::SessionId([0; 32]),
+            jump_threshold: Duration::from_secs(1),
+        };
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        assert_eq!(
+            compositor
+                .enable_session_lock(invalid, now, socket)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Locking));
+        compositor.state.lock_event(Event::RenderFailed);
+        assert!(
+            compositor
+                .state
+                .session_lock
+                .as_ref()
+                .unwrap()
+                .needs_cover_frame()
+        );
+        assert!(compositor.authd_fd().is_none());
+        assert!(compositor.sleep_hold_token().is_none());
+        let now = Clocks::exact(BOOT, BOOT + Duration::from_secs(10));
+        let token = lock::HoldToken {
+            instance: invalid.instance,
+            generation: 0,
+        };
+        assert!(!compositor.end_sleep_hold(now, token));
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        assert!(compositor.reattach_authd(socket).is_err());
+        compositor.dispatch_at(now).unwrap();
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Locked));
+
+        let mut id = [0; 32];
+        id[0] = b'1';
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let valid = lock::Config {
+            session: lock::SessionId(id),
+            ..invalid
+        };
+        compositor.enable_session_lock(valid, now, socket).unwrap();
+        assert_eq!(compositor.session_phase(), Some(lock::Phase::Locking));
+        assert!(compositor.authd_fd().is_some());
+        assert!(compositor.sleep_hold_token().is_some());
     }
 
     fn queue_grant(compositor: &mut Compositor, peer: &mut UnixStream) {

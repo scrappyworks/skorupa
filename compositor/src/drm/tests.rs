@@ -251,3 +251,12 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
         [1, 2]
     );
 }
+
+#[test]
+fn req_lock_010_only_the_active_seat_rechecks_a_dark_output_immediately() {
+    for power in [OutputPower::Off, OutputPower::WakeRequested] {
+        assert!(power.off_on_active_seat(true));
+        assert!(!power.off_on_active_seat(false));
+    }
+    assert!(!OutputPower::On.off_on_active_seat(true));
+}
