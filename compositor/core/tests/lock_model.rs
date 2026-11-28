@@ -28,6 +28,7 @@
 //! | `req_grant_007_cx_skip_window_gen` | `cx_skip_window_gen` | `ablate_window_gen` | `propC_noLateDelivery` |
 //! | `req_auth_017_cx_keep_attempt_on_authd_disconnect` | `cx_keep_attempt_on_authd_disconnect` | `ablate_broker_disconnect` | `propA_broker` |
 //! | `req_lock_015_cx_ack_stale_flip` | `cx_ack_stale_flip` | `ablate_stale_flip` | `propB_covered` |
+//! | `req_grant_015_cx_coincident_allow` | `cx_coincident_allow` | `ablate_instance` | `propC_consent` |
 //! | `req_grant_008_cx_stop_by_holder` | `cx_stop_by_holder` | `ablate_stop_generation` | `propC_stopExact` |
 //! | `req_lock_018_sleep_hold_closes_gap` | `sleepHoldClosesGapGuardTest` | `ablate_sleep_hold` | `propS_ackedSleepCovered` |
 //! | `req_lock_018_sleep_hold_survives_restart` | `sleepHoldSurvivesRestartGuardTest` | `ablate_hold_restart` | `propS_ackedSleepCovered` |
@@ -104,17 +105,25 @@ struct World {
 
 /// The model's history variables: no reducer reads them, the checks do.
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent history predicates from the Quint model"
+)]
 struct History {
     /// Acknowledged and not yet unlocked by a verdict.
     must_cover: bool,
     /// Resumed and not yet unlocked by a verdict since.
     must_relock: bool,
+    /// Quint's nextMustBeLock survives an unlock until a frame is submitted.
+    next_must_be_lock: bool,
     opened_this_wake: bool,
     /// Bindings of verdicts issued by an `authd` that has since gone.
     dead_broker: HashSet<Binding>,
     used: HashSet<Binding>,
     /// Grants made since the session was last locked, asleep or restarted.
     fresh: HashSet<u64>,
+    /// The consent prompt still open in the UI, observed through its effects.
+    open_prompt: Option<grant::PromptId>,
     stopped: HashSet<u64>,
     delivered: Vec<u64>,
     deliveries: usize,
@@ -162,6 +171,7 @@ impl World {
         self.seen.fresh.clear();
         self.seen.stopped.clear();
         self.seen.delivered.clear();
+        self.seen.open_prompt = None;
         self.check();
     }
 
@@ -193,6 +203,13 @@ impl World {
             covered || !self.seen.must_cover,
             "B: session on an acknowledged lock"
         );
+        if self.phase() == Phase::Locked && self.output_on {
+            assert_eq!(
+                self.screen,
+                Some(Content::Protected),
+                "B: locked on an enabled output without its cover"
+            );
+        }
         let locked = self.phase() != Phase::Unlocked;
         assert!(
             self.seen.must_cover || self.phase() != Phase::Locked,
@@ -222,7 +239,10 @@ impl World {
                     self.authd = Some(binding);
                     self.seen.opened_this_wake = true;
                 }
-                lock::Effect::LockAcknowledged { .. } => self.seen.must_cover = true,
+                lock::Effect::LockAcknowledged { .. } => {
+                    self.seen.must_cover = true;
+                    self.seen.next_must_be_lock |= !self.output_on;
+                }
                 lock::Effect::ReleaseSleepInhibitor { nonce, .. } => self.releases.push(nonce),
                 lock::Effect::Unlock { .. } => {
                     self.seen.must_cover = false;
@@ -281,6 +301,14 @@ impl World {
         }
         let exposed = self.seen.must_relock && content == Content::Session;
         assert!(!exposed, "B: session frame submitted after a resume");
+        if self.seen.next_must_be_lock {
+            assert_eq!(
+                content,
+                Content::Protected,
+                "B: first submission was session content"
+            );
+            self.seen.next_must_be_lock = false;
+        }
         self.flip = Some((content, false));
         self.lock_event(lock::Event::FrameSubmitted(content));
         Some(content)
@@ -307,6 +335,7 @@ impl World {
     }
 
     fn output_off(&mut self) {
+        self.seen.next_must_be_lock |= self.phase() != Phase::Unlocked;
         (self.screen, self.flip, self.output_on) = (None, None, false);
         self.lock_event(lock::Event::OutputOff);
     }
@@ -341,6 +370,7 @@ impl World {
         }
         self.now.boottime += Duration::from_secs(3600);
         self.seen.must_relock = true;
+        self.seen.next_must_be_lock = true;
         self.seen.opened_this_wake = false;
         self.seen.fresh.clear();
         self.check();
@@ -418,8 +448,28 @@ impl World {
         self.grants = state;
         for effect in &effects {
             match *effect {
-                grant::Effect::ShowPrompt { prompt, .. } => self.prompt = Some(prompt),
+                grant::Effect::ShowPrompt { prompt, .. } => {
+                    assert_eq!(prompt.instance, config(self.instance).instance);
+                    self.prompt = Some(prompt);
+                    self.seen.open_prompt = Some(prompt);
+                }
+                grant::Effect::ClosePrompt { prompt } => {
+                    self.seen.open_prompt.take_if(|open| *open == prompt);
+                }
                 grant::Effect::Granted(grant) => {
+                    let allowed =
+                        self.seen
+                            .open_prompt
+                            .take()
+                            .map(|prompt| grant::Event::Answered {
+                                prompt,
+                                allow: true,
+                            });
+                    assert_eq!(
+                        Some(event),
+                        allowed,
+                        "C: grant without Allow for the open prompt"
+                    );
                     self.issued.push(grant);
                     self.seen.fresh.insert(grant.generation);
                 }
@@ -464,6 +514,10 @@ impl World {
                 }
                 _ => {}
             }
+        }
+        if let grant::Event::Answered { prompt, .. } | grant::Event::PromptExited { prompt } = event
+        {
+            self.seen.open_prompt.take_if(|open| *open == prompt);
         }
         self.check();
         effects
@@ -848,6 +902,38 @@ fn req_lock_018_sleep_hold_survives_restart() {
     assert_eq!(world.screen, Some(Content::Protected));
 }
 
+/// A positive answer for the previous instance cannot grant the first
+/// request of this instance, even when both prompts received an Allow.
+#[test]
+fn req_grant_015_cx_coincident_allow() {
+    let mut world = World::unlocked();
+    world.comp_ask(Kind::PortalStream);
+    let old = world.prompt.unwrap();
+    let old_answer = grant::Event::Answered {
+        prompt: old,
+        allow: true,
+    };
+
+    world.comp_restart();
+    world.present();
+    world.bridge_report();
+    let binding = world.reach_verdict();
+    world.verdict(binding, Outcome::Granted);
+    world.comp_ask(Kind::PortalStream);
+    let current = world.prompt.unwrap();
+    let current_answer = grant::Event::Answered {
+        prompt: current,
+        allow: true,
+    };
+    assert_eq!(old.number, current.number);
+    assert_ne!(old.instance, current.instance);
+
+    world.grant_event(old_answer);
+    assert_eq!(world.issued, []);
+    world.grant_event(current_answer);
+    assert_eq!(world.issued.len(), 1);
+}
+
 /// One action of the model, or one fault of its environment.
 #[derive(Clone, Copy, Debug)]
 enum Action {
@@ -1074,4 +1160,34 @@ fn req_lock_001_random_walks_reach_the_witnesses() {
     assert!(unlocks > 128, "{unlocks} of 256 walks unlocked");
     assert!(wakes > 100, "{wakes} of 256 walks unlocked twice");
     assert!(deliveries > 100, "{deliveries} of 256 walks delivered");
+}
+
+#[test]
+#[should_panic(expected = "B: locked on an enabled output without its cover")]
+fn req_lock_010_panel_oracle_rejects_an_acknowledged_blank_output() {
+    let mut world = World::start();
+    world.present();
+    assert_eq!(world.phase(), Phase::Locked);
+    world.screen = None;
+    world.check();
+}
+
+/// Mirrors noBlindAttemptGuardTest and outputReturnsLockFirstTest.
+#[test]
+fn req_lock_010_dark_lock_needs_a_visible_cover_before_authentication() {
+    let mut world = World::unlocked();
+    world.output_off();
+    world.comp_lock();
+    assert_eq!(world.phase(), Phase::Locked);
+    assert!(world.comp_open_attempt().is_none());
+
+    world.output_back();
+    assert_eq!(world.phase(), Phase::Locking);
+    assert!(world.comp_open_attempt().is_none());
+    assert_eq!(world.comp_render(true), Some(Content::Protected));
+    assert!(world.comp_open_attempt().is_none());
+    world.kms_flip_done();
+    let binding = world.reach_verdict();
+    world.verdict(binding, Outcome::Granted);
+    assert_eq!(world.phase(), Phase::Unlocked);
 }
