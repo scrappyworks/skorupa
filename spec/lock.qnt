@@ -21,7 +21,7 @@ module defects {
     | AckOnSubmit | AckAnyFlip | NoBoottime | AckStaleFlip
     | KeepLockedOnResume | BlindAttempt
     // sleep
-    | StaleAck | NoSleepHold | HoldMemoryOnly | HoldAnyReport | NoFdStore
+    | StaleAck | NoSleepHold | LateSleepHold | HoldMemoryOnly | HoldAnyReport | NoFdStore
     // grants
     | NoRevokeOnLock | CheckAtEnqueueOnly | GrantByName | TimerOnlyExpiry | SkipWindowGen
     | StopByHolder | DeliverDuringPrompt
@@ -132,8 +132,9 @@ module lock {
     pams: Set[Result],        // pwcheck -> authd
     verdicts: Set[Result],    // authd -> compositor
     lockReqs: Set[int],       // bridge -> compositor
+    receivedLockReqs: Set[int], // delivered sleep requests in this model trace
     lockAcks: Set[int],       // compositor -> bridge
-    holdQs: Set[Tok],         // compositor -> bridge: hold token, sent with an ack and at start
+    holdQs: Set[Tok],         // compositor -> bridge: hold token, sent at receipt, with an ack, and at start
     sleepOvers: Set[Tok],     // bridge -> compositor: logind is not preparing for sleep
     asks: Set[AskId],         // compositor -> consent UI
     answers: Set[Answer],     // consent UI -> compositor
@@ -270,7 +271,7 @@ module lock {
     },
     net' = {
       challenges: Set(), creds: Set(), checks: Set(), pams: Set(), verdicts: Set(),
-      lockReqs: Set(), lockAcks: Set(), holdQs: Set(), sleepOvers: Set(),
+      lockReqs: Set(), receivedLockReqs: Set(), lockAcks: Set(), holdQs: Set(), sleepOvers: Set(),
       asks: Set(), answers: Set(), stops: Set(),
     },
     gh' = {
@@ -292,8 +293,7 @@ module lock {
 
   // ------------------------------------------------- compositor: lock, frames
 
-  /// Lock request from any source: shortcut, idle timer, logind Lock, or
-  /// PrepareForSleep relayed by the bridge. REQ-LOCK-007.
+  /// Lock request from a shortcut, idle timer or logind Lock. REQ-LOCK-007.
   action compLock = all {
     clockOk,
     comp.phase == Unlocked,
@@ -696,15 +696,35 @@ module lock {
     }
   }
 
-  /// REQ-LOCK-024: the compositor answers a lock request only
-  /// while `Locked`, and echoes the nonce of that request.
-  /// REQ-LOCK-026: the acknowledgement is a commitment. In the same step the
-  /// compositor closes the open attempt and enters the sleep hold under a new
-  /// hold token, which travels with the acknowledgement.
-  action compAckLockReq(r: int): bool = {
-    val held = { ...comp, hold: true, open: false, holdN: comp.holdN + 1 }
+  /// REQ-LOCK-026: receiving a new sleep request locks the session and
+  /// closes the attempt in one transition, before presentation and the ack.
+  action compRecvSleepReq(r: int): bool = {
+    val locked = lockNow(comp)
+    val enterHold = HOLD_RULE and not(defect(LateSleepHold))
+    val held = { ...locked, hold: true, open: false, holdN: comp.holdN + 1 }
     all {
+      clockOk,
       net.lockReqs.contains(r),
+      not(net.receivedLockReqs.contains(r)),
+      net' = {
+        ...net,
+        receivedLockReqs: net.receivedLockReqs.union(Set(r)),
+        holdQs: if (enterHold) net.holdQs.union(Set(tokOf(held))) else net.holdQs,
+      },
+      gh' = if (comp.phase == Unlocked) { ...gh, revoked: gh.issued } else gh,
+      comp' = if (enterHold) held else locked,
+      auth' = if (enterHold) { ...auth, uiUp: false } else auth,
+      kms' = kms, sl' = sl, world' = world,
+    }
+  }
+
+  /// REQ-LOCK-024: only a received request can be acknowledged, and only
+  /// while Locked. The acknowledgement echoes the nonce and the hold token.
+  action compAckLockReq(r: int): bool = {
+    val held = if (comp.hold) comp
+      else { ...comp, hold: true, open: false, holdN: comp.holdN + 1 }
+    all {
+      net.receivedLockReqs.contains(r),
       not(net.lockAcks.contains(r)),
       clockOk,
       comp.phase == Locked,
@@ -1128,6 +1148,7 @@ module lock {
 
   action stepSleep = any {
     all { sl.nextReq < MAX_REQ, bridgeSeeSleep },
+    all { comp.epoch < MAX_EPOCH or comp.phase != Unlocked, compRecvSleepReq(sl.req) },
     compAckLockReq(sl.req),
     bridgeRecvAck(sl.req),
     nondet drain = oneOf(Set(true, false))
@@ -1179,6 +1200,8 @@ module lock {
     nondet v = oneOf(net.verdicts)
     compRecvVerdict(v),
     nondet r = oneOf(net.lockReqs)
+    all { comp.epoch < MAX_EPOCH or comp.phase != Unlocked, compRecvSleepReq(r) },
+    nondet r = oneOf(net.receivedLockReqs)
     compAckLockReq(r),
     nondet r = oneOf(net.lockAcks)
     bridgeRecvAck(r),
@@ -1327,6 +1350,12 @@ module lock {
   /// pending sleep cycle until that cycle ends, the session stays locked.
   val propS_committed = gh.committed implies comp.phase != Unlocked
 
+  /// REQ-LOCK-026: the current sleep cannot unlock the session once the
+  /// compositor consumes any request for that cycle.
+  val propS_preparing =
+    (sl.pending and gh.cycleReqs.exists(r => net.receivedLockReqs.contains(r)))
+      implies comp.phase != Unlocked
+
   /// sleep (REQ-LOCK-018): at the moment a valid acknowledgement releases the
   /// inhibitor, the session is locked and the panel shows none of it.
   val propS_release = not(gh.uncoveredRelease)
@@ -1358,7 +1387,7 @@ module lock {
   val safety = and {
     propA_verdict, propA_pam, propA_typed, propA_wake, propA_broker, propA_onePam,
     propB_covered, propB_phase, propB_resume, propB_firstSubmit, propB_shown,
-    propS_sleep, propS_committed, propS_release, propS_ackedSleepCovered,
+    propS_sleep, propS_preparing, propS_committed, propS_release, propS_ackedSleepCovered,
     propS_crashKeepsDelay,
     propC_noLateDelivery, propC_lockRevokes, propC_consent, propC_stopExact,
     propD_agent, propD_v1, propT_noDelivery,
@@ -1440,6 +1469,8 @@ module lock {
   action sleepProgress =
     if (sl.bridgeUp and sl.req == 0) bridgeSeeSleep
     else if (sl.bridgeUp and sl.inhibit and net.lockAcks.contains(sl.req)) bridgeRecvAck(sl.req)
+    else if (sl.bridgeUp and sl.inhibit and not(net.receivedLockReqs.contains(sl.req)))
+      compRecvSleepReq(sl.req)
     else if (sl.bridgeUp and sl.inhibit) compAckLockReq(sl.req)
     else stutter
 
@@ -1493,7 +1524,7 @@ module lock {
   /// within UNLOCK_STEPS fault-free steps from each sampled 40-step prefix.
   /// The schedule may have to finish a sleep cycle or wait for the bridge's
   /// report first (REQ-LOCK-026), and present a fresh lock frame (REQ-LOCK-015).
-  pure val UNLOCK_STEPS = 24
+  pure val UNLOCK_STEPS = 25
 
   run unlockProgressTest =
     init
@@ -1594,7 +1625,7 @@ module lock {
       .then(logindPrepareSleep)
       .then(bridgeSeeSleep)
       .then(toLocked)
-      .then(compAckLockReq(1))
+      .then(compRecvSleepReq(1)).then(compAckLockReq(1))
       .then(bridgeRecvAck(1))
       .then(logindSuspend(true))
       .expect(sl.suspended and kms.screen == LockFrame and gh.sawSleepByAck and safety)
@@ -1791,7 +1822,7 @@ module lock {
   run staleAckPrefix =
     init
       .then(logindPrepareSleep).then(bridgeSeeSleep).then(toLocked)
-      .then(compAckLockReq(1)).then(bridgeRecvAck(1)).then(logindSuspend(true))
+      .then(compRecvSleepReq(1)).then(compAckLockReq(1)).then(bridgeRecvAck(1)).then(logindSuspend(true))
       .then(resume).then(compSeeJump).then(compRender(true)).then(kmsFlipDone)
       .then(toVerdict11).then(compRecvVerdict(OK11))
       .then(bridgeRearm).then(logindPrepareSleep).then(bridgeSeeSleep)
@@ -1804,7 +1835,7 @@ module lock {
   /// REQ-LOCK-024: the second request already has a matching acknowledgement,
   /// but it is the nonce of the message actually received that authorizes release.
   run cx_coincident_ack =
-    staleAckPrefix.then(toLocked).then(compAckLockReq(2))
+    staleAckPrefix.then(toLocked).then(compRecvSleepReq(2)).then(compAckLockReq(2))
       .expect(net.lockAcks == Set(1, 2) and gh.lockedSinceReq)
       .then(bridgeRecvAck(1))
       .expect(not(sl.inhibit) and not(propS_sleep))
@@ -1967,12 +1998,29 @@ module lock {
 
   // --------------------------------------------- sleep hold (REQ-LOCK-026)
 
+  /// REQ-LOCK-026: an in-flight verdict cannot unlock after receipt of a
+  /// sleep request, even though the acknowledgement has not been sent.
+  run req_lock_026_refuses_verdict_before_ackTest =
+    init.then(toLocked).then(toVerdict11)
+      .then(logindPrepareSleep).then(bridgeSeeSleep)
+      .then(compRecvSleepReq(1))
+      .expect(comp.hold and not(comp.open) and net.lockAcks == Set() and safety)
+      .then(compRecvVerdict(OK11).fail())
+
+  /// REQ-LOCK-026: holding only at acknowledgement permits a valid unlock
+  /// after receipt and before the compositor sends that acknowledgement.
+  run cx_late_sleep_hold =
+    init.then(toLocked).then(toVerdict11)
+      .then(logindPrepareSleep).then(bridgeSeeSleep)
+      .then(compRecvSleepReq(1)).then(compRecvVerdict(OK11))
+      .expect(coreSafety and not(propS_preparing) and net.lockAcks == Set())
+
   /// A positive verdict for (1,1,1) is in flight when the compositor
   /// acknowledges the lock request of the pending sleep.
   run ackPrefix =
     init
       .then(logindPrepareSleep).then(bridgeSeeSleep).then(toLocked).then(toVerdict11)
-      .then(compAckLockReq(1))
+      .then(compRecvSleepReq(1)).then(compAckLockReq(1))
 
   /// REQ-LOCK-018 without the hold. The verdict is valid and arrives after
   /// the acknowledgement was sent. The session unlocks and is presented, and
@@ -2024,7 +2072,7 @@ module lock {
   run restartPrefix =
     init
       .then(logindPrepareSleep).then(bridgeSeeSleep).then(toLocked)
-      .then(compAckLockReq(1)).then(compRestart)
+      .then(compRecvSleepReq(1)).then(compAckLockReq(1)).then(compRestart)
       .then(compRender(true)).then(kmsFlipDone).then(bridgeRecvAck(1))
       .expect(comp.phase == Locked and not(sl.inhibit) and gh.committed)
 
@@ -2048,7 +2096,7 @@ module lock {
   run staleReportPrefix =
     init.then(compRestart).then(bridgeReportAwake(T20))
       .then(compRender(true)).then(kmsFlipDone)
-      .then(logindPrepareSleep).then(bridgeSeeSleep).then(compAckLockReq(1))
+      .then(logindPrepareSleep).then(bridgeSeeSleep).then(compRecvSleepReq(1)).then(compAckLockReq(1))
       .expect(comp.hold and tokOf(comp) == T21 and gh.committed)
 
   /// A report accepted whatever token it echoes ends the hold of a sleep that
@@ -2103,16 +2151,16 @@ module lock {
       .expect(comp.hold and sl.pending and sl.inhibit and not(sl.bridgeUp))
 
   /// unlockProgress, the price of REQ-LOCK-026 and REQ-LOCK-015 in steps:
-  /// 19 fault-free steps. Output on and lock frame (3), bridge restart and a
-  /// new acknowledged request (4), suspend, resume and jump (3), the lock
+  /// 20 fault-free steps. Output on and lock frame (3), bridge restart and a
+  /// new acknowledged request (5), suspend, resume and jump (3), the lock
   /// frame of the new wake period (2), a new attempt (7).
   run worstCaseUnlockTest =
-    worstCasePrefix.then(19.reps(_ => progressStep(true)))
+    worstCasePrefix.then(20.reps(_ => progressStep(true)))
       .expect(comp.phase == Unlocked and gh.sawUnlockAfterResume and safety)
 
-  /// The 19 steps are needed: after 18 the verdict is still in flight.
+  /// The 20 steps are needed: after 19 the verdict is still in flight.
   run worstCaseUnlockLowerBoundTest =
-    worstCasePrefix.then(18.reps(_ => progressStep(true)))
+    worstCasePrefix.then(19.reps(_ => progressStep(true)))
       .expect(comp.phase == Locked and comp.open and safety)
 
   // ------------------------------- sleep without an acknowledgement (REQ-LOCK-012)
@@ -2148,7 +2196,7 @@ module lock {
   /// under a new nonce, and the sleep begins covered.
   run bridgeRestartCoveredSleepTest =
     bridgeCrashPrefix.then(bridgeStart).then(bridgeSeeSleep).then(toLocked)
-      .then(compAckLockReq(1)).then(bridgeRecvAck(1)).then(logindSuspend(true))
+      .then(compRecvSleepReq(1)).then(compAckLockReq(1)).then(bridgeRecvAck(1)).then(logindSuspend(true))
       .expect(sl.suspended and kms.screen == LockFrame and gh.ackSleep and safety)
 
   /// Residual risk: the service manager gave the unit up. Covered by
@@ -2166,7 +2214,7 @@ module lock {
       .then(compRender(true)).then(kmsFlipFail)
       .expect(comp.phase == Locking and kms.screen == SessionFrame)
       .then(compBlankOutput).then(compAckNoOutput)
-      .then(compAckLockReq(1)).then(bridgeRecvAck(1)).then(logindSuspend(true))
+      .then(compRecvSleepReq(1)).then(compAckLockReq(1)).then(bridgeRecvAck(1)).then(logindSuspend(true))
       .expect(sl.suspended and kms.screen == Blank and gh.ackSleep and safety)
 
   // ----------------------- fresh lock frame before an attempt (REQ-LOCK-015, -010)

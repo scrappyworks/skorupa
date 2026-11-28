@@ -14,25 +14,24 @@ the session, shows it, or delivers it to a client that has lost its grant.
   is the design for v1, `post_v1_agent_capture` adds the option planned after
   v1, and `env_resettle_flip` is the chosen design under a weaker assumption
   about the kernel.
-- `ablations.qnt`: 28 variants that each remove one rule. One of them is the
+- `ablations.qnt`: 29 variants that each remove one rule. One of them is the
   rejected design in which the lock client unlocks the session itself.
 
-The variants are in a file of their own because of the tool: with all 31
+The variants are in a file of their own because of the tool: with all the
 instances in one file the flattened model is too large for `quint verify`
 0.33.1, which then exits with status 0 and prints no verdict (finding 14).
 
 ## Results in short
 
-- The model checks 23 safety predicates. The recorded runs below distinguish
+- The model checks 24 safety predicates. The recorded runs below distinguish
   random sampling, bounded symbolic checking and explicit-state search.
-- All 28 variants are refuted, each by a random simulation and by a short
-  hand-written trace. The rejected `ext-session-lock` design is refuted in
+- The 29 variants each have a hand-written counterexample trace. The rejected `ext-session-lock` design is refuted in
   4 steps.
 - The open questions of the first validation are decided, and each decision
   is a rule in the chosen design, an invariant in `safety`, and a variant
   that removes the rule and fails:
-  - A sleep acknowledgement is a commitment (the **sleep hold**,
-    REQ-LOCK-026). The machine no longer sleeps with the session on the panel
+  - The **sleep hold** starts as soon as the compositor receives the bridge's
+    request (REQ-LOCK-026). The machine no longer sleeps with the session on the panel
     once the compositor acknowledged the lock for that sleep, and the
     inhibitor is no longer released with the session visible.
   - A resume, and a returning output, void the presentation of the lock. No
@@ -69,7 +68,7 @@ the capture observation in the post-v1 instance. See the
 # Types and names.
 quint typecheck variants.qnt
 
-# Scenario, guard and progress tests on the chosen design (61 tests).
+# Scenario, guard and progress tests on the chosen design (62 tests).
 quint test --main=chosen variants.qnt
 
 # Random simulation of the chosen design against all invariants.
@@ -80,7 +79,7 @@ quint run variants.qnt --main=chosen --invariant=safety \
 quint run variants.qnt --main=chosen --max-samples=100000 --max-steps=100 --n-threads=4 \
   --invariants propA_verdict propA_pam propA_typed propA_wake propA_broker \
     propA_onePam propB_covered propB_phase propB_resume propB_firstSubmit \
-    propB_shown propS_sleep propS_committed propS_release propS_ackedSleepCovered \
+    propB_shown propS_sleep propS_preparing propS_committed propS_release propS_ackedSleepCovered \
     propS_crashKeepsDelay propC_noLateDelivery propC_lockRevokes propC_consent \
     propC_stopExact propD_agent propD_v1 propT_noDelivery \
   --witnesses witUnlock witAck witGrant witDelivery witDrop witSleepByAck \
@@ -100,7 +99,7 @@ quint run ablations.qnt --main=rejected_client_unlock --invariant=safety
 # Its hand-written counterexample as a test. Every variant has one.
 quint test --main=rejected_client_unlock --match=counterexample ablations.qnt
 
-# No counterexample trace runs on the chosen design (34 failures expected).
+# No counterexample trace runs on the chosen design (35 failures expected).
 quint test --main=chosen --match=cx_ variants.qnt
 
 # The chosen design under the weaker kernel assumption.
@@ -311,7 +310,8 @@ Variants added with the decisions:
 
 | Module | Rule removed (`DEFECT`) | Steps | Violates | Guard test on `chosen` |
 | --- | --- | --- | --- | --- |
-| `ablate_sleep_hold` | an acknowledgement for a sleep starts the hold (`NoSleepHold`) | 16, 17 | `propS_release`; `propS_ackedSleepCovered` | `noAttemptInHoldGuardTest`, `sleepHoldClosesGapGuardTest`, `ackedSleepCoveredTest` |
+| `ablate_sleep_hold` | a sleep request starts the hold (`NoSleepHold`) | 16, 17 | `propS_release`; `propS_ackedSleepCovered` | `noAttemptInHoldGuardTest`, `sleepHoldClosesGapGuardTest`, `ackedSleepCoveredTest` |
+| `ablate_late_sleep_hold` | the hold starts on receipt of a sleep request (`LateSleepHold`) | 13 | `propS_preparing` | `req_lock_026_refuses_verdict_before_ackTest` |
 | `ablate_hold_restart` | a new compositor instance starts in the hold (`HoldMemoryOnly`) | 17, 20 | `propS_committed`; `propS_ackedSleepCovered` | `sleepHoldSurvivesRestartGuardTest` |
 | `ablate_hold_token` | the report that ends the hold echoes the current token (`HoldAnyReport`) | 15 | `propS_committed` | `staleSleepOverGuardTest` |
 | `ablate_fd_store` | the inhibitor descriptor outlives the bridge process (`NoFdStore`) | 3 | `propS_crashKeepsDelay` | `bridgeCrashKeepsDelayGuardTest`, `bridgeRestartCoveredSleepTest` |
@@ -715,17 +715,21 @@ traces:
   verdict arrives second, and logind suspends with the session on the panel
   (`propS_ackedSleepCovered`).
 
-The rule, REQ-LOCK-026: in the step that sends the acknowledgement the
-compositor closes the open attempt and enters the hold. In the hold it opens
-no attempt and accepts no verdict. The acknowledgement carries a hold token,
-`{ inst, n }`, with `n` counted up at every acknowledgement. The hold ends on
+REQ-LOCK-026 closes the open attempt and enters the hold on receipt of the
+bridge's sleep request. Acknowledging the lock can wait for presentation.
+The compositor increments `n` at receipt and sends the token `{ inst, n }`
+to the bridge and in the acknowledgement. The hold ends on
 the clock jump of a resume, or on a report from the bridge that echoes the
 current token. The bridge sends the report only after it received the token,
 while logind's `PreparingForSleep` is false, and while it holds a delay
 inhibitor again. A new compositor instance starts in the hold with a token of
 its own, which it announces when it connects to the bridge.
 
-Three versions of the rule were refuted before this one:
+Holding only from acknowledgement leaves a valid verdict usable between
+receipt and acknowledgement (`cx_late_sleep_hold`, `ablate_late_sleep_hold`).
+The chosen design tests receipt and acknowledgement as separate actions.
+
+Three earlier versions of the rule also have counterexamples:
 
 - A hold kept in compositor memory only. The compositor restarts between its
   acknowledgement and the suspend, the new instance knows of no sleep, and a
@@ -1023,7 +1027,8 @@ a model trace can be replayed as a reducer test.
 | `authdRestart` | `authd`; compositor lock | `authd`: initial state has no challenge. Compositor: `AuthdDisconnected` | `KillLockUi`; the open attempt is consumed |
 | `logindPrepareSleep`, `bridgeSeeSleep` | bridge | `PrepareForSleep(true)` | `SendLockRequest { nonce }` |
 | `logindSleepFailed` | bridge | `PrepareForSleep(false)` without a clock jump | `TakeInhibitor`, then `SendSleepOver` for the token it holds |
-| `compAckLockReq` | compositor lock | `LockRequestReceived { nonce }`, answered on entering or while `Locked` | `SendLockAck { nonce, token }`, `KillLockUi`; the hold begins in the same transition |
+| `compRecvSleepReq` | compositor lock | `PrepareForSleep { nonce }` | Start the hold, close the attempt, send the hold token and request a lock |
+| `compAckLockReq` | compositor lock | Lock presented or output confirmed off, or already `Locked` on receipt | Send the acknowledgement with the nonce and current token |
 | `bridgeRecvAck` | bridge | `LockAckReceived { nonce }` | `ReleaseInhibitor` when the nonce is the current one |
 | `bridgeRearm` | bridge | `PrepareForSleep(false)`, or start without an inhibitor in the descriptor store | `TakeInhibitor`, `StoreDescriptor` |
 | `bridgeReportAwake(t)` | bridge | `HoldTokenReceived { token }` or `PrepareForSleep(false)`, once `PreparingForSleep` reads false and the inhibitor is held | `SendSleepOver { token }` |
@@ -1081,7 +1086,7 @@ named in a comment next to the action, invariant or test that covers it.
 | REQ-LOCK-021 | `lockNow`, `compDispatch`, `propC_lockRevokes`, `queuedDeliveryDroppedByLockTest` |
 | REQ-LOCK-024 | `compAckLockReq`, `bridgeRecvAck`, `staleLockAckGuardTest` |
 | REQ-LOCK-025 | `clockOk`, `noFrameBeforeJumpGuardTest` |
-| REQ-LOCK-026 | `compAckLockReq`, `bridgeReportAwake`, `compHoldRelease`, `compSeeJump`, `freshComp`, `propS_committed`, `propS_ackedSleepCovered`, `propB_shown`, `ackCommitsGuardTest`, `noAttemptInHoldGuardTest`, `sleepHoldClosesGapGuardTest`, `sleepHoldSurvivesRestartGuardTest`, `staleSleepOverGuardTest`, `reportNeedsInhibitorGuardTest`, `holdEndsOnResumeTest`, `holdEndsAfterFailedSleepTest` |
+| REQ-LOCK-026 | `compRecvSleepReq`, `propS_preparing`, `req_lock_026_refuses_verdict_before_ackTest`, `compAckLockReq`, `bridgeReportAwake`, `compHoldRelease`, `compSeeJump`, `freshComp`, `propS_committed`, `propS_ackedSleepCovered`, `propB_shown`, `ackCommitsGuardTest`, `noAttemptInHoldGuardTest`, `sleepHoldClosesGapGuardTest`, `sleepHoldSurvivesRestartGuardTest`, `staleSleepOverGuardTest`, `reportNeedsInhibitorGuardTest`, `holdEndsOnResumeTest`, `holdEndsAfterFailedSleepTest` |
 | REQ-LOCK-027 | `bridgeCrash`, `bridgeStart`, `bridgeRearm`, `bridgeFdLost`, `propS_crashKeepsDelay`, `bridgeCrashKeepsDelayGuardTest`, `bridgeRestartCoveredSleepTest` |
 | REQ-AUTH-001 | `compRecvVerdict`, `propA_verdict`, `happyPathTest`, `wrongSecretStaysLockedTest`, `staleInstanceVerdictGuardTest`, `staleEpochVerdictGuardTest` |
 | REQ-AUTH-003 | `authdRecvPam`, `propA_pam` |

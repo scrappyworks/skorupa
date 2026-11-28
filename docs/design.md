@@ -82,9 +82,10 @@ stateDiagram-v2
 - **Acknowledge after presentation.** Lock is confirmed only after a locked frame is on screen.
   Sleep waits for that confirmation. A resume or a returning output voids the confirmation, and
   credentials are taken only while a current locked frame is on screen.
-- **A sleep acknowledgement is a commitment.** From the acknowledgement until the sleep is over
-  the compositor accepts no verdict (the sleep hold). The hold ends on the clock jump of the
-  resume or on the bridge's report for the compositor's hold token.
+- **Sleep hold starts at request receipt.** The compositor closes the attempt as soon as it
+  receives the bridge's sleep request. The hold ends on the resume clock jump or on a report
+  that echoes the current hold token. The bridge sends the report after it holds a delay
+  inhibitor again and reads `PreparingForSleep` as false.
 - **Every failure stays locked:** no output, failed page flip, inhibitor timeout, `lock/ui` crash
   loop, first frame after resume, a `CLOCK_BOOTTIME` jump. A compositor crash returns to the
   greeter, which asks for the password.
