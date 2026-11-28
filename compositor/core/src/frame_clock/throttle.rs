@@ -23,8 +23,15 @@ impl VBlankThrottle {
         refresh_interval: Option<Duration>,
         timestamp: Duration,
     ) -> Option<Duration> {
-        let deadline = self.deadline(refresh_interval, timestamp)?;
-        Some(deadline.saturating_sub(timestamp).min(refresh_interval?))
+        if let Some((last, refresh)) = Option::zip(self.last_vblank_timestamp, refresh_interval) {
+            let passed = timestamp.saturating_sub(last);
+            if passed < refresh / 2 {
+                return Some(refresh.saturating_sub(passed));
+            }
+        }
+
+        self.last_vblank_timestamp = Some(timestamp);
+        None
     }
 
     /// Absolute pacing deadline on the same monotonic clock as the flip.
@@ -33,14 +40,12 @@ impl VBlankThrottle {
         refresh_interval: Option<Duration>,
         timestamp: Duration,
     ) -> Option<Duration> {
-        if let Some((last, refresh)) = Option::zip(self.last_vblank_timestamp, refresh_interval) {
-            let passed = timestamp.saturating_sub(last);
-            if passed < refresh / 2 {
-                return Some(last.saturating_add(refresh));
-            }
-        }
-
-        self.last_vblank_timestamp = Some(timestamp);
-        None
+        self.throttle(refresh_interval, timestamp)?;
+        // A held flip keeps the last reference; dispatch may already have
+        // passed its next refresh even when the hardware timestamp did not.
+        Some(
+            self.last_vblank_timestamp?
+                .saturating_add(refresh_interval?),
+        )
     }
 }
