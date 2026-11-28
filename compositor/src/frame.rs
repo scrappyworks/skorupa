@@ -324,6 +324,12 @@ impl State {
                         // below will pace protected retries.
                         self.lock_event(LockEvent::RenderFailed);
                     }
+                    let immediate = if outcome == RenderOutcome::Submitted {
+                        self.lock_event(LockEvent::FrameSubmitted(content));
+                        self.immediate_presentation(now, sample)
+                    } else {
+                        None
+                    };
                     self.pace(
                         now,
                         Event::Rendered {
@@ -333,9 +339,17 @@ impl State {
                         },
                         sample,
                     );
-                    if outcome == RenderOutcome::Submitted {
-                        self.lock_event(LockEvent::FrameSubmitted(content));
-                        self.complete_immediate(content, now, sample);
+                    if let Some((at, sequence)) = immediate {
+                        self.lock_event(LockEvent::FramePresented(content));
+                        self.pace(
+                            at,
+                            Event::FlipCompleted {
+                                now: at,
+                                time: None,
+                                sequence,
+                            },
+                            sample,
+                        );
                     }
                 }
                 Effect::ArmTimer { timer, at } => *self.timers.slot(timer) = Some(at),
@@ -381,35 +395,26 @@ impl State {
         }
     }
 
-    fn complete_immediate(
+    /// Called just after submission, before the pacer can send client callbacks.
+    fn immediate_presentation(
         &mut self,
-        content: Content,
         now: Duration,
         sample: &mut impl FnMut() -> Clocks,
-    ) {
-        let (now, sequence) = match &self.backend {
+    ) -> Option<(Duration, u32)> {
+        match &self.backend {
             Backend::Headless(_) => {
                 self.flips = self.flips.wrapping_add(1);
-                (now, self.flips)
+                Some((now, self.flips))
             }
-            Backend::Drm(backend) if backend.awaiting_flip() => return,
-            // commit_frame completed without a kernel timestamp or MSC.
-            Backend::Drm(_) => {
+            Backend::Drm(backend) if backend.committed_synchronously() => {
+                // The blocking commit has returned. Check for resume before
+                // releasing callbacks and use software time with unknown MSC.
                 let clocks = sample();
                 self.lock_clock(clocks);
-                (clocks.monotonic, 0)
+                Some((clocks.monotonic, 0))
             }
-        };
-        self.lock_event(LockEvent::FramePresented(content));
-        self.pace(
-            now,
-            Event::FlipCompleted {
-                now,
-                time: None,
-                sequence,
-            },
-            sample,
-        );
+            Backend::Drm(_) => None,
+        }
     }
 
     fn render(

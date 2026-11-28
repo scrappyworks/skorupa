@@ -51,6 +51,11 @@ before the probe releases the old completion. Authentication remains fenced
 until a separate completion for the fresh cover. A VT switch also checks that
 a verdict opened before seat loss cannot restore the session.
 
+The guest also switches between two ordinary workspaces while withholding an
+earlier flip event. It checks each workspace on the KMS output before releasing
+the event. After the watchdog expires, ordinary frames can use a synchronous
+commit. The original event cannot acknowledge a later lock cover.
+
 A permanently missing completion keeps a successfully disabled output dark
 until the DRM session is recreated. After failed blanking attempts, input or
 DRM progress can rearm the bounded retry. The deadline relies on a responsive

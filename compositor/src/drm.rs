@@ -395,8 +395,8 @@ impl Drm {
         self.can_blank() && self.frames.submission(content).is_some()
     }
 
-    pub(crate) fn awaiting_flip(&self) -> bool {
-        matches!(self.frames.pending_flip, Some(PendingFlip::Awaited))
+    pub(crate) fn committed_synchronously(&self) -> bool {
+        matches!(self.frames.pending_flip, Some(PendingFlip::Retired))
     }
 
     pub(crate) fn can_blank(&self) -> bool {
