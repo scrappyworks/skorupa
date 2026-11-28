@@ -227,6 +227,11 @@ impl Client {
         (child, role)
     }
 
+    #[allow(dead_code)] // Used by headless subsurface tests.
+    pub fn request_frame(&self, surface: &WlSurface) {
+        surface.frame(&self.qh, CallbackKind::Frame);
+    }
+
     /// A shared-memory buffer filled with one color. `format` says whether
     /// the top byte of `pixel` is alpha or padding.
     pub fn buffer(&mut self, width: i32, height: i32, format: Format, pixel: u32) -> WlBuffer {

@@ -32,7 +32,9 @@ use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Monotonic, Point, Rectangle};
-use smithay::wayland::compositor::{SurfaceAttributes, SurfaceData};
+use smithay::wayland::compositor::{
+    SurfaceAttributes, SurfaceData, TraversalAction, with_surface_tree_downward,
+};
 use smithay::wayland::presentation::Refresh;
 use tracing::warn;
 
@@ -668,19 +670,35 @@ impl State {
         if self.timers.fallback.is_some() {
             return;
         }
-        let mut waiting = false;
-        for window in &self.windows {
-            with_surfaces_surface_tree(window.toplevel.wl_surface(), |_, states| {
-                // A surface without a buffer never gets a callback, so
-                // waiting for it would keep the timer running for nothing.
-                let mapped = states
-                    .data_map
-                    .get::<RendererSurfaceStateUserData>()
-                    .is_some_and(|state| state.lock().is_ok_and(|state| state.view().is_some()));
-                let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-                waiting |= mapped && !attributes.current().frame_callbacks.is_empty();
-            });
-        }
+        let waiting = self.windows.iter().any(|window| {
+            let mut waiting = false;
+            with_surface_tree_downward(
+                window.toplevel.wl_surface(),
+                (),
+                |_, states, &()| {
+                    // Frame delivery skips a bufferless surface and all its descendants.
+                    let mapped = states
+                        .data_map
+                        .get::<RendererSurfaceStateUserData>()
+                        .is_some_and(|state| {
+                            state.lock().is_ok_and(|state| state.view().is_some())
+                        });
+                    if !mapped {
+                        return TraversalAction::SkipChildren;
+                    }
+                    let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+                    if attributes.current().frame_callbacks.is_empty() {
+                        TraversalAction::DoChildren(())
+                    } else {
+                        waiting = true;
+                        TraversalAction::Break
+                    }
+                },
+                |_, _, &()| {},
+                |_, _, &()| true,
+            );
+            waiting
+        });
         if waiting {
             self.timers.fallback = Some(now.saturating_add(FRAME_CALLBACK_FALLBACK));
         }
