@@ -203,6 +203,13 @@ fn req_perf_003_mode_without_a_usable_timing_has_no_refresh_interval() {
 }
 
 #[test]
+fn req_perf_012_relative_throttle_preserves_delay_at_clock_limit() {
+    let mut throttle = VBlankThrottle::default();
+    assert_eq!(throttle.throttle(Some(HZ_60), Duration::MAX), None);
+    assert_eq!(throttle.throttle(Some(HZ_60), Duration::MAX), Some(HZ_60));
+}
+
+#[test]
 fn req_perf_012_first_vblank_and_unknown_refresh_pass_the_throttle() {
     let mut throttle = VBlankThrottle::default();
     assert_eq!(throttle.throttle(Some(HZ_60), ns(10)), None);

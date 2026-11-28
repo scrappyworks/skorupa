@@ -247,14 +247,14 @@ Abstractions that matter when reading a result:
 | D | `propD_v1` | without `AGENT_CAPTURE` no prompt, grant or delivery for agent capture of a host window exists | REQ-AGENT-001 |
 | trust | `propT_noDelivery` | nothing is delivered to a grant holder while a consent prompt is open | REQ-TRUST-006, REQ-GRANT-013 |
 
-Liveness is checked as bounded progress, not as a temporal formula. Each test
-runs 40 random steps with faults and then a fixed fault-free schedule:
+The two progress tests follow a 40-step random prefix with a fixed
+fault-free schedule. The remaining tests start from specific scenarios.
 
 | Test | Claim | Requirement |
 | --- | --- | --- |
 | `lockAckProgressTest` | a lock request is acknowledged, the panel is covered and a pending sleep is released within 12 steps | lockAckProgress (proposed) |
-| `unlockProgressTest` | with the right secret the session unlocks within 24 steps (20 before the decisions) | unlockProgress (proposed) |
-| `worstCaseUnlockTest`, `worstCaseUnlockLowerBoundTest` | from a constructed worst state (failed sleep, hold, output off, crashed bridge, no UI) the fault-free schedule needs exactly 19 steps | unlockProgress (proposed) |
+| `unlockProgressTest` | from each sampled state the correct secret unlocks the session within 25 fault-free steps | unlockProgress (proposed) |
+| `worstCaseUnlockTest`, `worstCaseUnlockLowerBoundTest` | from the specified state (acknowledged sleep still pending, output off, bridge down), the fault-free schedule needs exactly 20 steps | unlockProgress (proposed) |
 | `holdEndsOnResumeTest`, `holdEndsAfterFailedSleepTest`, `unlockAfterResumeTest` | the hold ends by the clock jump without the bridge, and by the report after a failed sleep; the unlock follows | REQ-LOCK-026 |
 
 What the decisions cost in steps of the fault-free schedule: two after a
@@ -525,7 +525,7 @@ ending in the negated predicate suffices.
 | `propD_v1` | The v1 gate rejects capture at init while transfer succeeds | Induction over prompt, table and queue. The property is constant true after v1, where the one-shot test exercises capture. |
 | `strongS_sleepCovered` | `unackedSleepResidualTest`, `witUncoveredSuspend` | Refuted on chosen in two steps, by decision (finding 2). Universal coverage of sleep would require a guarantee from logind. `strongS_ackedSleepCovered` is implied by `propS_ackedSleepCovered`. |
 | `wit*`, `reach*` | Positive state predicates | Count sampled traces. One reaching trace establishes existence. The capture-grant state is intentionally unreachable in v1 and reached after v1. |
-| `lockAckProgressTest`, `unlockProgressTest`, `worstCaseUnlockTest` | Endpoints of sampled 40-step prefixes, and one constructed worst state | Run the deterministic recovery schedule, at most 12 and 24 transitions respectively; exactly 19 from the worst state. Fair-schedule liveness would need explicit delivery assumptions, and an assumption that the bridge unit restarts. |
+| `lockAckProgressTest`, `unlockProgressTest`, `worstCaseUnlockTest` | Endpoints of sampled 40-step prefixes, and one constructed worst state | The deterministic recovery schedule has bounds of 12 transitions for lock acknowledgement and 25 for unlock on sampled states. The constructed state takes exactly 20 transitions to unlock. Fair-schedule liveness would need explicit delivery assumptions, and an assumption that the bridge unit restarts. |
 
 For a Lean proof, instantiate the chosen design first. A universal theorem
 over an unrestricted `DEFECT` would include the rejected designs. Establish

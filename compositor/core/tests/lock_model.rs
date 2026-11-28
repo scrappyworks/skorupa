@@ -1,10 +1,10 @@
 //! Counterexamples of the Quint model, replayed on the Rust reducers.
 //!
-//! `spec/lock.qnt` has one trace `cx_<defect>` for every variant in
-//! `spec/variants.qnt`. The trace breaks a property once the rule named by the
-//! defect is removed. Each test here replays one trace as events on the lock
-//! and grant reducers, composed with a small model of the panel ([`World`]),
-//! and asserts what the matching guard test asserts on the chosen design.
+//! `spec/lock.qnt` contains traces for the variants in `spec/ablations.qnt`.
+//! Each trace breaks a property once a rule is removed. The tests below
+//! replay selected traces on the lock and grant reducers and a small model
+//! of the panel ([`World`]). They check the same properties as the guard
+//! tests on the chosen design.
 //!
 //! | Test | Trace | Variant | Property broken in the variant |
 //! | --- | --- | --- | --- |
@@ -29,8 +29,8 @@
 //! | `req_auth_017_cx_keep_attempt_on_authd_disconnect` | `cx_keep_attempt_on_authd_disconnect` | `ablate_broker_disconnect` | `propA_broker` |
 //! | `req_lock_015_cx_ack_stale_flip` | `cx_ack_stale_flip` | `ablate_stale_flip` | `propB_covered` |
 //! | `req_grant_008_cx_stop_by_holder` | `cx_stop_by_holder` | `ablate_stop_generation` | `propC_stopExact` |
-//! | `req_lock_018_sleep_hold_closes_gap` | `sleepHoldClosesGap` | `option_sleep_hold` | `strongS_ackedSleepCovered` |
-//! | `req_lock_018_sleep_hold_survives_restart` | `sleepHoldSurvivesRestart` | `option_sleep_hold` | `strongS_ackedSleepCovered` |
+//! | `req_lock_018_sleep_hold_closes_gap` | `sleepHoldClosesGapGuardTest` | `ablate_sleep_hold` | `propS_ackedSleepCovered` |
+//! | `req_lock_018_sleep_hold_survives_restart` | `sleepHoldSurvivesRestartGuardTest` | `ablate_hold_restart` | `propS_ackedSleepCovered` |
 //!
 //! Where a replay differs from its trace:
 //!
@@ -506,6 +506,7 @@ impl World {
         let generation = grant.generation;
         let effects = self.grant_event(grant::Event::Use {
             generation,
+            kind: grant.kind,
             connection: self.connection(grant.kind),
             target: Target::Window(self.window),
         });
@@ -817,9 +818,8 @@ fn req_grant_008_cx_stop_by_holder() {
     assert!(!world.comp_dispatch(&first));
 }
 
-/// REQ-LOCK-018 and REQ-LOCK-026: `knownGapUnlockBetweenAckAndSuspendTest`
-/// with the hold. The verdict that was in flight at the release is dropped,
-/// so the machine sleeps covered.
+/// REQ-LOCK-018 and REQ-LOCK-026: the verdict in flight when the
+/// compositor acknowledges the sleep is dropped, so the machine sleeps covered.
 #[test]
 fn req_lock_018_sleep_hold_closes_gap() {
     let mut world = World::unlocked();
@@ -940,16 +940,15 @@ impl World {
             Phase::Locking => {
                 self.comp_render(true);
             }
-            Phase::Locked => match self.comp_open_attempt() {
-                Some(binding) => {
+            Phase::Locked if self.lock.hold_token().is_some() => self.bridge_report(),
+            Phase::Locked => {
+                // An earlier action may have left a challenge with the broker.
+                self.comp_open_attempt();
+                if let Some(binding) = self.authd {
                     self.authd_issue(Outcome::Granted);
                     self.verdict(binding, Outcome::Granted);
                 }
-                // In the hold, or an attempt is open already: start over.
-                None => {
-                    self.bridge_report();
-                }
-            },
+            }
             Phase::Unlocked => {
                 let kinds = [Kind::PortalStream, Kind::AgentTransfer];
                 self.comp_ask(kinds[self.issued.len() % 2]);
@@ -1012,6 +1011,21 @@ impl World {
             }
         }
     }
+}
+
+/// REQ-AUTH-001: the progress scheduler can finish a valid attempt even when
+/// the random prefix already opened it and left the challenge with authd.
+#[test]
+fn req_auth_001_progress_finishes_an_open_attempt() {
+    let mut world = World::start();
+    world.present();
+    world.bridge_report();
+    let binding = world.comp_open_attempt().unwrap();
+
+    world.progress();
+
+    assert_eq!(world.phase(), Phase::Unlocked);
+    assert!(world.seen.used.contains(&binding));
 }
 
 fn proptest_config() -> ProptestConfig {

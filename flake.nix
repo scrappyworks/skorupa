@@ -75,7 +75,7 @@
             ./budget.toml
             ./scripts
             (lib.fileset.fileFilter (file: file.hasExt "rs") ./.)
-            (lib.fileset.maybeMissing ./docs/requirements.md)
+            ./docs/requirements.md
           ]
           ++ lib.optional (builtins.pathExists ./spec) (
             lib.fileset.fileFilter (file: file.hasExt "qnt") ./spec
@@ -241,7 +241,10 @@
         );
 
         budget = script "budget" [ pkgs.python3 pkgs.tokei ] "python3 -B scripts/budget.py";
-        req-lint = script "req-lint" [ pkgs.python3 ] "python3 -B scripts/req-lint.py";
+        req-lint = script "req-lint" [ pkgs.python3 ] ''
+          python3 -B scripts/test_req_lint.py
+          python3 -B scripts/req-lint.py
+        '';
       };
 
       devShells.${system} = {
