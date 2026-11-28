@@ -418,17 +418,18 @@ impl State {
         }
     }
 
-    /// Checks the pending attachment before the renderer can consume it.
+    fn reject_invalid_attachment(&self, attributes: &mut SurfaceAttributes) -> Option<String> {
+        let Some(BufferAssignment::NewBuffer(buffer)) = &attributes.buffer else {
+            return None;
+        };
+        let reason = self.buffer_size_error(buffer, attributes.buffer_scale)?;
+        attributes.buffer = None;
+        Some(reason)
+    }
+
     fn check_buffer_size(&self, surface: &WlSurface) {
         let error = with_states(surface, |states| {
-            let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            let pending = attributes.pending();
-            let Some(BufferAssignment::NewBuffer(buffer)) = &pending.buffer else {
-                return None;
-            };
-            let reason = self.buffer_size_error(buffer, pending.buffer_scale)?;
-            pending.buffer = None;
-            Some(reason)
+            self.reject_invalid_attachment(states.cached_state.get::<SurfaceAttributes>().pending())
         });
         if let Some(reason) = error {
             surface.post_error(wl_surface::Error::InvalidSize, reason);
@@ -440,17 +441,21 @@ impl State {
     /// actual replacement or removal in the same commit always wins.
     fn apply_buffer_mapping(&self, surface: &WlSurface) {
         let error = with_states(surface, |states| {
+            let mut attributes = states.cached_state.get::<SurfaceAttributes>();
+            let current = attributes.current();
+            if current.buffer.is_some() {
+                // A synchronized child can enter a parent transaction without
+                // a child pre-commit hook. Validate each applied attachment.
+                return self.reject_invalid_attachment(current);
+            }
             let renderer = states
                 .data_map
                 .get::<RendererSurfaceStateUserData>()?
                 .lock()
                 .ok()?;
-            let mut attributes = states.cached_state.get::<SurfaceAttributes>();
-            let current = attributes.current();
-            if current.buffer.is_some()
-                || (current.buffer_scale == renderer.buffer_scale()
-                    && smithay::utils::Transform::from(current.buffer_transform)
-                        == renderer.buffer_transform())
+            if current.buffer_scale == renderer.buffer_scale()
+                && smithay::utils::Transform::from(current.buffer_transform)
+                    == renderer.buffer_transform()
             {
                 return None;
             }

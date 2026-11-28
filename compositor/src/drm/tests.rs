@@ -167,6 +167,16 @@ fn exchange(compositor: &mut Compositor, client: &mut client::Client) {
     client.read();
 }
 
+fn connect(compositor: &mut Compositor) -> client::Client {
+    let (server, stream) = std::os::unix::net::UnixStream::pair().unwrap();
+    compositor.add_client(server).unwrap();
+    let mut client = client::Client::new(stream);
+    for _ in 0..3 {
+        exchange(compositor, &mut client);
+    }
+    client
+}
+
 fn render_session(state: &mut State) -> frame::RenderedFrame {
     let crate::state::Backend::Headless(backend) = &mut state.backend else {
         unreachable!()
@@ -187,7 +197,6 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
     use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
     use smithay::utils::Monotonic;
     use smithay::wayland::presentation::Refresh;
-    use std::os::unix::net::UnixStream;
     use std::time::Duration;
     use wayland_client::protocol::wl_shm;
 
@@ -196,12 +205,7 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
         ..Config::default()
     })
     .unwrap();
-    let (server, stream) = UnixStream::pair().unwrap();
-    compositor.add_client(server).unwrap();
-    let mut client = client::Client::new(stream);
-    for _ in 0..3 {
-        exchange(&mut compositor, &mut client);
-    }
+    let mut client = connect(&mut compositor);
     let window = client.create_window();
     exchange(&mut compositor, &mut client);
     let first = client.buffer(4, 4, wl_shm::Format::Xrgb8888, 0xffff_0000);
@@ -250,4 +254,45 @@ fn req_perf_015_commit_during_fence_wait_keeps_feedback_for_its_own_frame() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
+}
+
+#[test]
+fn req_api_010_applied_attachment_is_checked_before_the_renderer_consumes_it() {
+    use smithay::backend::renderer::utils::with_renderer_surface_state;
+    use smithay::wayland::compositor::{
+        BufferAssignment, CompositorHandler, SurfaceAttributes, with_states,
+    };
+    use wayland_client::protocol::{wl_shm, wl_surface};
+
+    let mut compositor = Compositor::new(Config {
+        output_size: (2, 2),
+        ..Config::default()
+    })
+    .unwrap();
+    let mut client = connect(&mut compositor);
+    let window = client.create_window();
+    exchange(&mut compositor, &mut client);
+    let buffer = client.buffer(2, 2, wl_shm::Format::Xrgb8888, 0xff00_ff00);
+    client.commit(&window, Some(&buffer));
+    exchange(&mut compositor, &mut client);
+
+    // Exercise the applied-state boundary independently of the pre-commit hook.
+    let surface = compositor.state.windows[0].toplevel.wl_surface().clone();
+    let resource =
+        with_renderer_surface_state(&surface, |state| (**state.buffer().unwrap()).clone()).unwrap();
+    compositor.state.config.max_buffer_size = (1, 1);
+    with_states(&surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .current()
+            .buffer = Some(BufferAssignment::NewBuffer(resource));
+    });
+    compositor.state.commit(&surface);
+    exchange(&mut compositor, &mut client);
+    let error = client
+        .protocol_error()
+        .expect("applied buffer must be checked");
+    assert_eq!(error.object_interface, "wl_surface");
+    assert_eq!(error.code, wl_surface::Error::InvalidSize as u32);
 }
