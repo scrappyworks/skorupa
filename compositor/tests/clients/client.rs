@@ -88,7 +88,7 @@ pub struct Data {
 pub struct Window {
     pub surface: WlSurface,
     _xdg_surface: XdgSurface,
-    _toplevel: XdgToplevel,
+    toplevel: XdgToplevel,
 }
 
 pub struct Client {
@@ -165,6 +165,10 @@ impl Client {
 
     /// A toplevel after its first, bufferless commit.
     pub fn create_window(&mut self) -> Window {
+        self.create_toplevel(None)
+    }
+
+    pub fn create_toplevel(&mut self, parent: Option<&Window>) -> Window {
         let surface = self
             .data
             .compositor
@@ -178,11 +182,14 @@ impl Client {
                 .unwrap()
                 .get_xdg_surface(&surface, &self.qh, ());
         let toplevel = xdg_surface.get_toplevel(&self.qh, ());
+        if let Some(parent) = parent {
+            toplevel.set_parent(Some(&parent.toplevel));
+        }
         surface.commit();
         Window {
             surface,
             _xdg_surface: xdg_surface,
-            _toplevel: toplevel,
+            toplevel,
         }
     }
 

@@ -84,6 +84,28 @@ pub(crate) struct Window {
     pub(crate) id: WindowId,
     pub(crate) toplevel: ToplevelSurface,
     mapped: bool,
+    pub(crate) dialog: bool,
+}
+
+impl Window {
+    fn set_size(&self, size: Option<Size<i32, Logical>>) {
+        self.toplevel.with_pending_state(|state| {
+            state.size = size;
+            // The tiling states describe independent windows.
+            for edge in [
+                xdg_toplevel::State::TiledLeft,
+                xdg_toplevel::State::TiledRight,
+                xdg_toplevel::State::TiledTop,
+                xdg_toplevel::State::TiledBottom,
+            ] {
+                if size.is_some() {
+                    state.states.set(edge);
+                } else {
+                    state.states.unset(edge);
+                }
+            }
+        });
+    }
 }
 
 /// Per-client data that Smithay asks for.
@@ -216,35 +238,20 @@ impl State {
         self.placements = self.layout.placements();
         let focus = self.layout.focus();
 
-        for window in &self.windows {
+        let output_size = self.output_size();
+        for window in &mut self.windows {
             let configured = self.layout.configure(window.id);
-            let initial_size = window
-                .toplevel
-                .parent()
-                .is_none()
-                .then(|| self.output_size());
+            window.dialog = configured.is_some_and(|configured| configured.size.is_none());
+            let size = configured.map_or_else(
+                || window.toplevel.parent().is_none().then_some(output_size),
+                |configured| configured.size.map(|size| (size.w, size.h).into()),
+            );
+            window.set_size(size);
             window.toplevel.with_pending_state(|state| {
-                state.size = configured.map_or_else(
-                    || initial_size,
-                    |configured| configured.size.map(|size| (size.w, size.h).into()),
-                );
                 if configured.is_some_and(|configured| configured.fullscreen) {
                     state.states.set(xdg_toplevel::State::Fullscreen);
                 } else {
                     state.states.unset(xdg_toplevel::State::Fullscreen);
-                }
-                // The tiling states describe independent windows.
-                for edge in [
-                    xdg_toplevel::State::TiledLeft,
-                    xdg_toplevel::State::TiledRight,
-                    xdg_toplevel::State::TiledTop,
-                    xdg_toplevel::State::TiledBottom,
-                ] {
-                    if state.size.is_some() {
-                        state.states.set(edge);
-                    } else {
-                        state.states.unset(edge);
-                    }
                 }
                 if configured.is_some_and(|configured| configured.activated) {
                     state.states.set(xdg_toplevel::State::Activated);
@@ -392,6 +399,7 @@ impl CompositorHandler for State {
             .iter()
             .position(|window| window.toplevel.wl_surface() == surface)
         {
+            let output_size = self.output_size();
             let window = &mut self.windows[index];
             let mapped = with_renderer_surface_state(surface, |state| state.buffer().is_some())
                 .unwrap_or(false);
@@ -431,6 +439,7 @@ impl CompositorHandler for State {
                 return;
             }
             if !window.toplevel.is_initial_configure_sent() {
+                window.set_size(window.toplevel.parent().is_none().then_some(output_size));
                 window.toplevel.send_configure();
             }
         }
@@ -460,8 +469,8 @@ impl XdgShellHandler for State {
             id,
             toplevel: surface,
             mapped: false,
+            dialog: false,
         });
-        self.arrange();
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {

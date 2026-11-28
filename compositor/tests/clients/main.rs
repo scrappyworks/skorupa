@@ -172,6 +172,30 @@ fn req_api_001_client_maps_a_toplevel_that_fills_the_output() {
     assert!(client.protocol_error().is_none());
 }
 
+#[test]
+fn req_layout_004_dialog_chooses_its_size_and_is_centered_over_its_parent() {
+    let mut fixture = Fixture::new(config());
+    let mut client = fixture.connect();
+    let parent = fixture.map(&mut client, RED);
+    let dialog = client.create_toplevel(Some(&parent));
+    fixture.sync(&mut client);
+    assert_eq!(client.data.configures.last().unwrap().size, (0, 0));
+
+    let buffer = client.buffer(8, 6, Format::Xrgb8888, BLUE);
+    client.commit(&dialog, Some(&buffer));
+    fixture.sync(&mut client);
+    fixture.advance_to(START + HZ_60);
+
+    let pixels = fixture.compositor.pixels().unwrap();
+    for (index, bytes) in pixels.as_chunks::<4>().0.iter().enumerate() {
+        let width = usize::try_from(WIDTH).unwrap();
+        let (x, y) = (index % width, index / width);
+        let inside = (28..36).contains(&x) && (21..27).contains(&y);
+        let expected = if inside { BLUE } else { RED };
+        assert_eq!(u32::from_ne_bytes(*bytes) | 0xff00_0000, expected);
+    }
+}
+
 /// A client that commits a new buffer on every frame callback. The headless
 /// backend completes a flip at once, so the pacing is the reducer's alone.
 fn presents_one_interval_apart(refresh_mhz: i32, interval: Duration) {
