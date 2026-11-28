@@ -4,6 +4,7 @@
 //! keyboard, `wl_output` and `wp_presentation`, each for every client.
 
 mod admission;
+pub(crate) mod geometry;
 
 use std::error::Error;
 use std::time::Duration;
@@ -446,6 +447,7 @@ impl CompositorHandler for State {
     fn new_surface(&mut self, surface: &WlSurface) {
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
             state.refuse_oversized_buffer(surface);
+            geometry::capture(surface);
         });
     }
 
@@ -459,6 +461,7 @@ impl CompositorHandler for State {
             let window = &mut self.windows[index];
             let mapped = with_renderer_surface_state(surface, |state| state.buffer().is_some())
                 .unwrap_or(false);
+            geometry::apply(&window.toplevel, window.mapped, mapped);
             if mapped != window.mapped {
                 window.mapped = mapped;
                 let id = window.id;
@@ -522,6 +525,7 @@ impl XdgShellHandler for State {
             admission::window_limit_reached(surface.wl_surface());
             return;
         };
+        geometry::reset(surface.wl_surface());
         self.windows.push(Window {
             id,
             toplevel: surface,
