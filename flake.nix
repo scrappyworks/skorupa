@@ -63,24 +63,25 @@
         root = ./.;
         fileset = rustFiles;
       };
+      quintFiles = lib.fileset.fileFilter (file: file.hasExt "qnt") ./spec;
+      quintSrc = lib.fileset.toSource {
+        root = ./spec;
+        fileset = quintFiles;
+      };
       # What `just budget` and `just req-lint` read: every Rust file of the
       # tree, wherever it lies, so that code outside a budgeted component is
-      # seen, plus the requirement catalog and the Quint model once they
-      # exist. A flake source holds tracked files only, so "every" means every
+      # seen, plus the requirement catalog and the Quint model. A flake
+      # source holds tracked files only, so "every" means every
       # tracked one.
       scriptSrc = lib.fileset.toSource {
         root = ./.;
-        fileset = lib.fileset.unions (
-          [
-            ./budget.toml
-            ./scripts
-            (lib.fileset.fileFilter (file: file.hasExt "rs") ./.)
-            ./docs/requirements.md
-          ]
-          ++ lib.optional (builtins.pathExists ./spec) (
-            lib.fileset.fileFilter (file: file.hasExt "qnt") ./spec
-          )
-        );
+        fileset = lib.fileset.unions [
+          ./budget.toml
+          ./scripts
+          (lib.fileset.fileFilter (file: file.hasExt "rs") ./.)
+          ./docs/requirements.md
+          quintFiles
+        ];
       };
 
       # Arguments for one Cargo workspace. `dir` is "." for the top-level
@@ -247,6 +248,13 @@
             buildPhaseCargoCommand = "bash ../scripts/fuzz-smoke.sh";
           }
         );
+
+        # REQ-OPS-010. Run every v1 scenario, with a bounded, repeatable
+        # sample of the two randomized progress schedules.
+        quint-scenarios = pkgs.runCommand "skorupa-quint-scenarios" { nativeBuildInputs = [ pkgs.quint ]; } ''
+          quint test --main=chosen --seed=0x534b4f52 --max-samples=32 ${quintSrc}/variants.qnt
+          touch $out
+        '';
 
         budget = script "budget" [ pkgs.python3 pkgs.tokei ] "python3 -B scripts/budget.py";
         req-lint = script "req-lint" [ pkgs.python3 ] ''
