@@ -39,6 +39,19 @@ fn prepared(content: Content) -> PreparedFrame {
 }
 
 #[test]
+fn req_input_005_two_keyboards_share_one_seat_key_transition() {
+    use KeyState::{Pressed, Released};
+
+    // The same key goes down on A, down on B, up on A, then up on B.
+    let events = [(Pressed, 1), (Pressed, 2), (Released, 1), (Released, 0)];
+    let transitions: Vec<_> = events
+        .into_iter()
+        .filter_map(|(state, count)| seat_key_transition(state, count))
+        .collect();
+    assert_eq!(transitions, [true, false]);
+}
+
+#[test]
 fn req_perf_013_lost_flip_allows_session_redraw_while_a_cover_still_needs_its_own_event() {
     let mut frames = DrmFrames {
         pending_flip: Some(PendingFlip::Awaited),
