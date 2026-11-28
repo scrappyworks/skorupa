@@ -349,8 +349,9 @@ impl FramePacer {
         // A hardware stamp slightly ahead of dispatch is common. A stamp
         // more than a refresh ahead cannot anchor either pacing or feedback.
         let refresh = self.clock.refresh_interval();
+        let interval = refresh.unwrap_or(FALLBACK_REFRESH_INTERVAL);
         let mut time = time.filter(|stamp| {
-            let valid = refresh.is_none_or(|interval| *stamp <= now.saturating_add(interval));
+            let valid = *stamp <= now.saturating_add(interval);
             if !valid {
                 effects.push(Effect::Anomaly(Anomaly::FlipFarInFuture));
             }
@@ -361,8 +362,11 @@ impl FramePacer {
 
         // A software completion has no physical vblank to pace it when the
         // output rate is unknown. Use the same estimate as an undamaged frame.
-        let pacing_interval =
-            refresh.or_else(|| time.is_none().then_some(FALLBACK_REFRESH_INTERVAL));
+        let pacing_interval = if time.is_some() {
+            refresh
+        } else {
+            Some(interval)
+        };
         if let Some(at) = self.throttle.deadline(pacing_interval, time, now) {
             if at > now {
                 self.cancel_watchdog(effects);

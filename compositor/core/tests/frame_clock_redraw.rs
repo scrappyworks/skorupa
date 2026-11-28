@@ -846,3 +846,19 @@ fn req_perf_012_software_flip_without_a_known_rate_uses_the_fallback() {
         hw_clock: false,
     }));
 }
+
+#[test]
+fn req_perf_013_unknown_refresh_cannot_hold_a_flip_until_a_corrupt_timestamp() {
+    let mut output = Harness::new(None);
+    output.redraw(ms(100));
+    output.rendered(ms(100), RenderOutcome::Submitted);
+    let first = output.flip(ms(100), Some(Duration::MAX), 1);
+    assert!(first.contains(&Effect::Anomaly(Anomaly::FlipFarInFuture)));
+    output.redraw(ms(106));
+    output.rendered(ms(106), RenderOutcome::Submitted);
+    output.flip(ms(106), None, 2);
+    assert_eq!(
+        output.deadline(Timer::Throttle),
+        Some(ms(100) + Duration::from_micros(16_667))
+    );
+}
