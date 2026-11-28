@@ -931,3 +931,30 @@ fn send_verdict(peer: &mut UnixStream, challenge: Challenge) {
     let len = message.encode(&mut frame).unwrap();
     peer.write_all(&frame[..len]).unwrap();
 }
+
+#[test]
+fn req_layout_008_headless_output_must_fit_the_layout() {
+    use skorupa_compositor::core::layout::MAX_OUTPUT_SIDE;
+
+    for output_size in [
+        (MAX_OUTPUT_SIDE + 1, 1),
+        (1, MAX_OUTPUT_SIDE + 1),
+        (0, 1),
+        (1, 0),
+    ] {
+        assert!(
+            Compositor::new(Config {
+                output_size,
+                ..config()
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        Compositor::new(Config {
+            output_size: (MAX_OUTPUT_SIDE, 1),
+            ..config()
+        })
+        .is_ok()
+    );
+}
