@@ -15,7 +15,6 @@ use smithay::backend::drm::{
 use smithay::backend::input::{InputEvent, KeyState, KeyboardKeyEvent};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::ImportMemWl;
-use smithay::backend::renderer::element::RenderElementStates;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiRenderer, gbm::GbmGlesBackend};
@@ -46,15 +45,19 @@ pub(crate) struct Drm {
     gpu: GpuManager<Api>,
     node: DrmNode,
     active: bool,
-    pending_flip: Option<PendingFlip>,
     power: OutputPower,
+    frames: DrmFrames,
+}
+
+#[derive(Default)]
+struct DrmFrames {
+    pending_flip: Option<PendingFlip>,
     prepared: Option<PreparedFrame>,
 }
 
 struct PreparedFrame {
     content: Content,
-    damaged: bool,
-    states: RenderElementStates,
+    rendered: frame::RenderedFrame,
     fence: Option<SyncPoint>,
 }
 
@@ -64,10 +67,85 @@ impl PreparedFrame {
     }
 }
 
+impl DrmFrames {
+    fn submission(&self, content: Content) -> Option<Submission> {
+        match self.pending_flip {
+            None => Some(Submission::Queue),
+            Some(PendingFlip::Expired | PendingFlip::Retired) if content == Content::Session => {
+                Some(Submission::Commit)
+            }
+            Some(_) => None,
+        }
+    }
+
+    fn expire_flip(&mut self) {
+        if matches!(self.pending_flip, Some(PendingFlip::Awaited)) {
+            self.pending_flip = Some(PendingFlip::Expired);
+        }
+    }
+
+    fn queue_redraw(&mut self) {
+        if let Some(frame) = &mut self.prepared {
+            frame.rendered.redraw_needed = true;
+        }
+    }
+
+    fn submit(
+        &mut self,
+        submit: impl FnOnce(Submission, Content) -> Result<(), Box<dyn Error>>,
+    ) -> Result<frame::RenderedFrame, Box<dyn Error>> {
+        let frame = self.prepared.take().ok_or("no prepared DRM frame")?;
+        if frame.rendered.damaged {
+            let mode = self
+                .submission(frame.content)
+                .ok_or("waiting for DRM flip")?;
+            submit(mode, frame.content)?;
+            self.pending_flip = Some(match mode {
+                Submission::Queue => PendingFlip::Awaited,
+                // Smithay replaced its pending frame. Its old kernel event can still arrive.
+                Submission::Commit => PendingFlip::Retired,
+            });
+        }
+        Ok(frame.rendered)
+    }
+
+    fn complete<E: std::fmt::Display>(
+        &mut self,
+        submitted: impl FnOnce() -> Result<Option<Content>, E>,
+    ) -> DrmFlip {
+        match self.pending_flip.take() {
+            None => DrmFlip::Ignored,
+            Some(PendingFlip::Retired) => DrmFlip::Expired,
+            Some(pending) => match submitted() {
+                Ok(Some(content)) if matches!(pending, PendingFlip::Awaited) => {
+                    DrmFlip::Presented(content)
+                }
+                Ok(_) if matches!(pending, PendingFlip::Expired) => DrmFlip::Expired,
+                Ok(_) => {
+                    tracing::warn!("DRM completion did not have a submitted frame");
+                    DrmFlip::Ignored
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "DRM completion failed");
+                    DrmFlip::Ignored
+                }
+            },
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum Submission {
+    Queue,
+    Commit,
+}
+
 enum PendingFlip {
     Awaited,
+    /// The notifier and Smithay may both still hold the old flip.
     Expired,
-    Cleared,
+    /// Only the notifier can still hold the old flip, after `clear` or `commit_frame`.
+    Retired,
 }
 
 #[derive(PartialEq, Eq)]
@@ -216,9 +294,8 @@ impl Drm {
             gpu,
             node,
             active: true,
-            pending_flip: None,
+            frames: DrmFrames::default(),
             power: OutputPower::On,
-            prepared: None,
         };
         Ok((drm, devices, output, config))
     }
@@ -233,18 +310,21 @@ impl Drm {
 
     pub(crate) fn prepare(
         &mut self,
+        output: &Output,
         windows: &[crate::state::Window],
         placements: &[frame::Placement],
         content: Content,
         force_full_redraw: bool,
     ) -> Result<bool, Box<dyn Error>> {
-        if let Some(frame) = &self.prepared
+        if let Some(frame) = &self.frames.prepared
             && frame.content == content
         {
             return Ok(frame.ready());
         }
-        self.prepared = None;
-        if force_full_redraw {
+        self.frames.prepared = None;
+        let synchronous = self.frames.submission(content) == Some(Submission::Commit);
+        // Redraw even an unchanged scene on the first recovery commit.
+        if force_full_redraw || matches!(self.frames.pending_flip, Some(PendingFlip::Expired)) {
             self.surface
                 .with_compositor(DrmCompositor::reset_buffer_ages);
         }
@@ -259,13 +339,17 @@ impl Drm {
                 &mut renderer,
                 &elements,
                 frame::background(content),
-                FrameFlags::DEFAULT,
+                if synchronous {
+                    FrameFlags::empty()
+                } else {
+                    FrameFlags::DEFAULT
+                },
             )
             .map_err(|err| err.to_string())?;
         let fence = match &frame.primary_element {
             PrimaryPlaneElement::Swapchain(element)
                 if !frame.is_empty
-                    && (content == Content::Protected || frame.needs_sync())
+                    && (content == Content::Protected || synchronous || frame.needs_sync())
                     && !element.sync.is_reached() =>
             {
                 Some(element.sync.clone())
@@ -275,44 +359,44 @@ impl Drm {
         // A modeset can block on an input fence even when KMS accepts it.
         // Keep one frame while the fence is pending so the cover timer can run.
         let ready = fence.is_none();
-        self.prepared = Some(PreparedFrame {
+        self.frames.prepared = Some(PreparedFrame {
             content,
-            damaged: !frame.is_empty,
-            states: frame.states,
+            rendered: frame::RenderedFrame::new(
+                output,
+                windows,
+                content,
+                !frame.is_empty,
+                frame.states,
+            ),
             fence,
         });
         Ok(ready)
     }
 
     pub(crate) fn discard_prepared(&mut self) {
-        self.prepared = None;
+        self.frames.prepared = None;
     }
 
-    pub(crate) fn discard_session_frame(&mut self) {
-        // A later client commit must keep its own presentation feedback.
-        if self
-            .prepared
-            .as_ref()
-            .is_some_and(|frame| frame.content == Content::Session)
-        {
-            self.discard_prepared();
-        }
+    pub(crate) fn queue_redraw(&mut self) {
+        self.frames.queue_redraw();
     }
 
-    pub(crate) fn submit(&mut self) -> Result<(bool, RenderElementStates, bool), Box<dyn Error>> {
-        let frame = self.prepared.take().ok_or("no prepared DRM frame")?;
-        if frame.damaged {
-            self.surface
-                .queue_frame(frame.content)
-                .map_err(|err| err.to_string())?;
-            self.pending_flip = Some(PendingFlip::Awaited);
-        }
-        Ok((frame.damaged, frame.states, frame.fence.is_some()))
+    pub(crate) fn submit(&mut self) -> Result<frame::RenderedFrame, Box<dyn Error>> {
+        self.frames.submit(|mode, content| {
+            match mode {
+                Submission::Queue => self.surface.queue_frame(content),
+                Submission::Commit => self.surface.commit_frame(),
+            }
+            .map_err(|err| err.to_string().into())
+        })
     }
 
-    pub(crate) fn ready_to_render(&self) -> bool {
-        // Leave timed-out flips in flight so a late completion keeps its original tag.
-        self.can_blank() && self.pending_flip.is_none()
+    pub(crate) fn ready_to_render(&self, content: Content) -> bool {
+        self.can_blank() && self.frames.submission(content).is_some()
+    }
+
+    pub(crate) fn awaiting_flip(&self) -> bool {
+        matches!(self.frames.pending_flip, Some(PendingFlip::Awaited))
     }
 
     pub(crate) fn can_blank(&self) -> bool {
@@ -324,8 +408,8 @@ impl Drm {
         self.discard_prepared();
         // clear retires the frame in Smithay. A queued event can still arrive
         // on this descriptor, so reserve its slot until the notifier drains it.
-        if self.pending_flip.is_some() {
-            self.pending_flip = Some(PendingFlip::Cleared);
+        if self.frames.pending_flip.is_some() {
+            self.frames.pending_flip = Some(PendingFlip::Retired);
         }
         self.power = OutputPower::Off;
         Ok(())
@@ -339,7 +423,10 @@ impl Drm {
     }
 
     pub(crate) fn wake_if_ready(&mut self) -> bool {
-        if self.active && self.power == OutputPower::WakeRequested && self.pending_flip.is_none() {
+        if self.active
+            && self.power == OutputPower::WakeRequested
+            && self.frames.pending_flip.is_none()
+        {
             self.surface.reset_buffers();
             self.power = OutputPower::On;
             return true;
@@ -348,30 +435,11 @@ impl Drm {
     }
 
     pub(crate) fn complete(&mut self) -> DrmFlip {
-        let Some(pending) = self.pending_flip.take() else {
-            return DrmFlip::Ignored;
-        };
-        if matches!(pending, PendingFlip::Cleared) {
-            return DrmFlip::Expired;
-        }
-        match (pending, self.surface.frame_submitted()) {
-            (PendingFlip::Awaited, Ok(Some(content))) => DrmFlip::Presented(content),
-            (PendingFlip::Expired | PendingFlip::Cleared, Ok(Some(_))) => DrmFlip::Expired,
-            (_, Ok(None)) => {
-                tracing::warn!("DRM completion did not have a submitted frame");
-                DrmFlip::Ignored
-            }
-            (_, Err(err)) => {
-                tracing::warn!(%err, "DRM completion failed");
-                DrmFlip::Ignored
-            }
-        }
+        self.frames.complete(|| self.surface.frame_submitted())
     }
 
     pub(crate) fn expire_flip(&mut self) {
-        if matches!(self.pending_flip, Some(PendingFlip::Awaited)) {
-            self.pending_flip = Some(PendingFlip::Expired);
-        }
+        self.frames.expire_flip();
     }
 
     pub(crate) fn pause(&mut self) {
@@ -476,47 +544,4 @@ impl Devices {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::os::fd::OwnedFd;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use smithay::backend::renderer::sync::{Fence, Interrupted};
-
-    use super::*;
-
-    #[derive(Debug)]
-    struct TestFence(Arc<AtomicBool>);
-
-    impl Fence for TestFence {
-        fn is_signaled(&self) -> bool {
-            self.0.load(Ordering::Relaxed)
-        }
-
-        fn wait(&self) -> Result<(), Interrupted> {
-            panic!("the event loop must poll a pending fence")
-        }
-
-        fn is_exportable(&self) -> bool {
-            false
-        }
-
-        fn export(&self) -> Option<OwnedFd> {
-            None
-        }
-    }
-
-    #[test]
-    fn req_lock_011_prepared_cover_polls_its_fence_without_waiting() {
-        let signaled = Arc::new(AtomicBool::new(false));
-        let frame = PreparedFrame {
-            content: Content::Protected,
-            damaged: true,
-            states: RenderElementStates::default(),
-            fence: Some(SyncPoint::from(TestFence(signaled.clone()))),
-        };
-        assert!(!frame.ready());
-        signaled.store(true, Ordering::Relaxed);
-        assert!(frame.ready());
-    }
-}
+mod tests;

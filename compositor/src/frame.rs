@@ -99,6 +99,49 @@ where
     elements
 }
 
+#[derive(Default)]
+pub(crate) struct RenderedFrame {
+    pub(crate) damaged: bool,
+    pub(crate) states: RenderElementStates,
+    pub(crate) feedback: Option<OutputPresentationFeedback>,
+    pub(crate) redraw_needed: bool,
+}
+
+impl RenderedFrame {
+    pub(crate) fn new(
+        output: &Output,
+        windows: &[Window],
+        content: Content,
+        damaged: bool,
+        states: RenderElementStates,
+    ) -> Self {
+        // REQ-PERF-015: take callbacks from the commits used by render_frame,
+        // before a fence wait gives clients a chance to replace those commits.
+        let feedback = (damaged && content == Content::Session).then(|| {
+            let mut feedback = OutputPresentationFeedback::new(output);
+            for window in windows {
+                take_presentation_feedback_surface_tree(
+                    window.toplevel.wl_surface(),
+                    &mut feedback,
+                    |surface, _| {
+                        states
+                            .element_was_presented(surface)
+                            .then(|| output.clone())
+                    },
+                    |_, _| wp_presentation_feedback::Kind::empty(),
+                );
+            }
+            feedback
+        });
+        Self {
+            damaged,
+            states,
+            feedback,
+            redraw_needed: false,
+        }
+    }
+}
+
 /// A surface that is not shown gets a frame callback when its last one is
 /// older than this.
 const FRAME_CALLBACK_THROTTLE: Duration = Duration::from_millis(995);
@@ -206,7 +249,7 @@ impl State {
 
     pub(crate) fn queue_redraw(&mut self) {
         if let Backend::Drm(backend) = &mut self.backend {
-            backend.discard_session_frame();
+            backend.queue_redraw();
         }
         // Queueing has no effects, so there is nothing to carry out.
         self.pacer = self.pacer.clone().step(Event::QueueRedraw).0;
@@ -292,20 +335,7 @@ impl State {
                     );
                     if outcome == RenderOutcome::Submitted {
                         self.lock_event(LockEvent::FrameSubmitted(content));
-                        if matches!(self.backend, Backend::Headless(_)) {
-                            // Nothing to wait for: the image in memory is the screen.
-                            self.lock_event(LockEvent::FramePresented(content));
-                            self.flips = self.flips.wrapping_add(1);
-                            self.pace(
-                                now,
-                                Event::FlipCompleted {
-                                    now,
-                                    time: None,
-                                    sequence: self.flips,
-                                },
-                                sample,
-                            );
-                        }
+                        self.complete_immediate(content, now, sample);
                     }
                 }
                 Effect::ArmTimer { timer, at } => *self.timers.slot(timer) = Some(at),
@@ -351,6 +381,37 @@ impl State {
         }
     }
 
+    fn complete_immediate(
+        &mut self,
+        content: Content,
+        now: Duration,
+        sample: &mut impl FnMut() -> Clocks,
+    ) {
+        let (now, sequence) = match &self.backend {
+            Backend::Headless(_) => {
+                self.flips = self.flips.wrapping_add(1);
+                (now, self.flips)
+            }
+            Backend::Drm(backend) if backend.awaiting_flip() => return,
+            // commit_frame completed without a kernel timestamp or MSC.
+            Backend::Drm(_) => {
+                let clocks = sample();
+                self.lock_clock(clocks);
+                (clocks.monotonic, 0)
+            }
+        };
+        self.lock_event(LockEvent::FramePresented(content));
+        self.pace(
+            now,
+            Event::FlipCompleted {
+                now,
+                time: None,
+                sequence,
+            },
+            sample,
+        );
+    }
+
     fn render(
         &mut self,
         now: Duration,
@@ -364,11 +425,17 @@ impl State {
                 .as_ref()
                 .is_some_and(crate::session_lock::SessionLock::needs_cover_frame);
         if let Backend::Drm(backend) = &mut self.backend {
-            if !backend.ready_to_render() {
+            if !backend.ready_to_render(content) {
                 return (RenderOutcome::Skipped, false);
             }
             let placements = if protected { &[][..] } else { &self.placements };
-            match backend.prepare(&self.windows, placements, content, force_full_redraw) {
+            match backend.prepare(
+                &self.output,
+                &self.windows,
+                placements,
+                content,
+                force_full_redraw,
+            ) {
                 Ok(true) => {}
                 Ok(false) => return (RenderOutcome::NoDamage, true),
                 Err(err) => {
@@ -397,18 +464,18 @@ impl State {
                 let elements = elements(backend.renderer(), &self.windows, placements);
                 backend
                     .render_scene(&elements, background(content), force_full_redraw)
-                    .map(|(damaged, states)| (damaged, states, false))
+                    .map(|(damaged, states)| {
+                        RenderedFrame::new(&self.output, &self.windows, content, damaged, states)
+                    })
             }
             Backend::Drm(backend) => backend.submit(),
         };
         match rendered {
-            Ok((damaged, states, redraw_after_flip)) => {
-                self.update_primary_scanout_output(&states);
-                if damaged {
-                    if !protected {
-                        self.pending_feedback = Some(self.take_presentation_feedback());
-                    }
-                    (RenderOutcome::Submitted, redraw_after_flip)
+            Ok(frame) => {
+                self.update_primary_scanout_output(&frame.states);
+                if frame.damaged {
+                    self.pending_feedback = frame.feedback;
+                    (RenderOutcome::Submitted, frame.redraw_needed)
                 } else if force_full_redraw {
                     (RenderOutcome::Failed, false)
                 } else {
@@ -444,7 +511,7 @@ impl State {
             DrmFlip::Expired => {
                 self.timers.cover.recovery_signal(now);
                 let woke = backend.wake_if_ready();
-                let ready = backend.ready_to_render();
+                let ready = backend.can_blank();
                 if woke {
                     self.lock_event(LockEvent::OutputOn);
                 }
@@ -498,6 +565,9 @@ impl State {
     }
 
     pub(crate) fn fence_frame_feedback(&mut self) {
+        if let Backend::Drm(backend) = &mut self.backend {
+            backend.discard_prepared();
+        }
         self.timers.fallback = None;
         self.discard_pending_feedback();
     }
@@ -530,22 +600,6 @@ impl State {
                 }
             });
         }
-    }
-
-    /// The feedback of the surfaces that the frame shows. That of a surface
-    /// that is not shown stays with it until a frame shows it or the client
-    /// replaces it; so does all of it when a frame changed nothing.
-    fn take_presentation_feedback(&self) -> OutputPresentationFeedback {
-        let mut feedback = OutputPresentationFeedback::new(&self.output);
-        for window in &self.windows {
-            take_presentation_feedback_surface_tree(
-                window.toplevel.wl_surface(),
-                &mut feedback,
-                surface_primary_scanout_output,
-                |_, _| wp_presentation_feedback::Kind::empty(),
-            );
-        }
-        feedback
     }
 
     fn send_frame_callbacks(&mut self, now: Duration, sequence: u32) {
