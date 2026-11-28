@@ -117,6 +117,11 @@ pub enum Event {
         window: WindowId,
         app_id: Option<String>,
     },
+    /// A mapped toplevel attached to a different parent or became independent.
+    ParentChanged {
+        window: WindowId,
+        parent: Option<WindowId>,
+    },
     /// A client asked for activation of a mapped window.
     Activate {
         window: WindowId,
@@ -496,8 +501,7 @@ impl Layout {
         }
     }
 
-    /// The window and its parents up to the tile. It ends: a parent was
-    /// mapped before its child and is only ever replaced by its own parent.
+    /// The window and its parents up to the tile. Reparenting rejects cycles.
     fn chain(&self, window: WindowId) -> impl Iterator<Item = WindowId> {
         std::iter::successors(Some(window), |window| self.parent(*window))
     }
@@ -628,6 +632,7 @@ impl Layout {
                     self.focus_window(window);
                 }
             }
+            Event::ParentChanged { window, parent } => self.reparent(window, parent),
             Event::FocusWindow(window) => self.focus_window(window),
             Event::Hover(window) => {
                 // Hover never changes what is shown, so it reaches only
@@ -810,6 +815,28 @@ impl Layout {
                 self.workspaces.swap(self.active, to);
                 self.active = to;
             }
+        }
+    }
+
+    fn reparent(&mut self, window: WindowId, parent: Option<WindowId>) {
+        let Some(home) = self.home(window) else {
+            return;
+        };
+        let parent = parent.filter(|id| self.windows.contains_key(id));
+        if self.parent(window) == parent
+            || parent.is_some_and(|id| self.chain(id).any(|member| member == window))
+        {
+            return;
+        }
+
+        if let Some(child) = self.windows.get_mut(&window) {
+            child.parent = parent;
+        }
+        if parent.is_some() {
+            self.workspaces[home].tiles.retain(|&tile| tile != window);
+        } else {
+            // The detached branch gets its own slot without activating it.
+            self.insert_workspace(home + 1, vec![window], Some(window));
         }
     }
 
